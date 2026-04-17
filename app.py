@@ -42,6 +42,72 @@ ALL_STATES = [
     ("VA", "Virginia"), ("WA", "Washington"), ("WV", "West Virginia"), ("WI", "Wisconsin"), ("WY", "Wyoming"),
 ]
 
+REQUIRED_COLUMNS = [
+    "state",
+    "state_name",
+    "runner_name",
+    "race_type",
+    "race_name",
+    "race_date",
+    "finish_time",
+    "city",
+    "notes",
+]
+
+VALID_RACE_TYPES = {"5K", "10K", "Half Marathon"}
+VALID_STATE_CODES = {code for code, _ in ALL_STATES}
+STATE_NAME_LOOKUP = {code: name for code, name in ALL_STATES}
+
+
+def build_template_df():
+    return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+
+def build_sample_df():
+    df = pd.DataFrame(SAMPLE_DATA)
+
+    # Make sure optional columns exist even in sample data
+    for col in ["city", "notes"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    return df[REQUIRED_COLUMNS]
+
+
+def validate_uploaded_csv(df: pd.DataFrame):
+    errors = []
+
+    missing_cols = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    if missing_cols:
+        errors.append(f"Missing required columns: {', '.join(missing_cols)}")
+        return errors
+
+    # Drop fully blank rows
+    df = df.dropna(how="all").copy()
+
+    invalid_states = sorted(set(df.loc[~df["state"].isin(VALID_STATE_CODES), "state"].dropna().astype(str)))
+    if invalid_states:
+        errors.append(f"Invalid state codes: {', '.join(invalid_states)}")
+
+    invalid_race_types = sorted(set(df.loc[~df["race_type"].isin(VALID_RACE_TYPES), "race_type"].dropna().astype(str)))
+    if invalid_race_types:
+        errors.append(f"Invalid race types: {', '.join(invalid_race_types)}")
+
+    # Validate dates
+    try:
+        pd.to_datetime(df["race_date"], errors="raise")
+    except Exception:
+        errors.append("One or more race_date values are invalid. Use YYYY-MM-DD.")
+
+    # Validate finish_time format
+    for i, value in enumerate(df["finish_time"], start=1):
+        try:
+            time_to_seconds(str(value))
+        except Exception:
+            errors.append(f"Invalid finish_time on row {i}: {value}")
+
+    return errors
+
 
 # -------------------------------------------------
 # Helpers
@@ -75,12 +141,14 @@ def seconds_to_pace(total_seconds: float, miles: float) -> str:
     return f"{pace_minutes}:{pace_remainder:02d} /mi"
 
 
-def prepare_race_df() -> pd.DataFrame:
-    df = pd.DataFrame(SAMPLE_DATA)
+def prepare_race_df(source_df: pd.DataFrame) -> pd.DataFrame:
+    df = source_df.copy()
     df["race_date"] = pd.to_datetime(df["race_date"])
-    df["finish_seconds"] = df["finish_time"].apply(time_to_seconds)
+    df["finish_seconds"] = df["finish_time"].astype(str).apply(time_to_seconds)
     df["distance_miles"] = df["race_type"].map(DISTANCE_MILES)
-    df["avg_mile_pace"] = df.apply(lambda row: seconds_to_pace(row["finish_seconds"], row["distance_miles"]), axis=1)
+    df["avg_mile_pace"] = df.apply(
+        lambda row: seconds_to_pace(row["finish_seconds"], row["distance_miles"]), axis=1
+    )
     df["race_date_display"] = df["race_date"].dt.strftime("%Y-%m-%d")
     return df
 
@@ -119,9 +187,66 @@ def best_time_for_group(group: pd.DataFrame) -> str:
 
 
 # -------------------------------------------------
+# Session-backed source data
+# -------------------------------------------------
+if "source_data" not in st.session_state:
+    st.session_state.source_data = build_sample_df()
+
+# -------------------------------------------------
+# Data Management
+# -------------------------------------------------
+with st.expander("Data Management", expanded=False):
+    st.markdown("Download a blank template, export current data, or upload a CSV to replace the current session data.")
+
+    template_df = build_template_df()
+    current_df = st.session_state.source_data.copy()
+
+    st.download_button(
+        label="Download Blank CSV Template",
+        data=template_df.to_csv(index=False).encode("utf-8"),
+        file_name="race_results_template.csv",
+        mime="text/csv",
+    )
+
+    st.download_button(
+        label="Download Current Data",
+        data=current_df.to_csv(index=False).encode("utf-8"),
+        file_name="race_results_current.csv",
+        mime="text/csv",
+    )
+
+    uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+
+    if uploaded_file is not None:
+        uploaded_df = pd.read_csv(uploaded_file)
+
+        st.write("Preview of uploaded file:")
+        st.dataframe(uploaded_df, use_container_width=True, hide_index=True)
+
+        errors = validate_uploaded_csv(uploaded_df)
+
+        if errors:
+            st.error("CSV validation failed:")
+            for err in errors:
+                st.write(f"- {err}")
+        else:
+            st.success("CSV looks valid.")
+
+            if st.button("Replace Current Data With Uploaded CSV"):
+                cleaned_df = uploaded_df.dropna(how="all").copy()
+
+                # Fill missing optional fields
+                for col in ["city", "notes"]:
+                    cleaned_df[col] = cleaned_df[col].fillna("")
+
+                st.session_state.source_data = cleaned_df[REQUIRED_COLUMNS].copy()
+                st.success("Current session data replaced successfully.")
+                st.rerun()
+
+# -------------------------------------------------
 # Data prep
 # -------------------------------------------------
-race_df = prepare_race_df()
+race_df = prepare_race_df(st.session_state.source_data)
 map_df = prepare_map_df(race_df)
 
 
