@@ -55,7 +55,7 @@ REQUIRED_COLUMNS = [
     "notes",
 ]
 
-VALID_RACE_TYPES = {"5K", "10K", "Half Marathon"}
+VALID_RACE_TYPES = {"5K", "10K", "10 Mile", "Half Marathon"}
 VALID_STATE_CODES = {code for code, _ in ALL_STATES}
 STATE_NAME_LOOKUP = {code: name for code, name in ALL_STATES}
 
