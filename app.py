@@ -26,6 +26,7 @@ SAMPLE_DATA = [
 DISTANCE_MILES = {
     "5K": 3.10686,
     "10K": 6.21371,
+    "10 Mile": 10,
     "Half Marathon": 13.1094,
 }
 
