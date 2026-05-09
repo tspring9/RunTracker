@@ -10,48 +10,35 @@ st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 # Sample preloaded data
 # -------------------------------------------------
 SAMPLE_DATA = [
-        "race_date": "4/16/2022",
-        "finish_time": "2:26:17",
-        "city": "Omaha",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "NV",
-        "state_name": "Nevada",
-        "runner_name": "Olivia",
-        "race_type": "Half Marathon",
-        "race_name": "Rock 'n' Roll Las Vegas Half Marathon",
-        "race_date": "2/23/2025",
-        "finish_time": "2:20:47",
-        "city": "Las Vegas",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "CO",
-        "state_name": "Colorado",
-        "runner_name": "",
-        "race_type": "Half Marathon",
-        "race_name": "All-Out Runapalooza",
-        "race_date": "8/8/2026",
-        "finish_time": "",
-        "city": "Denver",
-        "notes": "",
-        "status": "Interested",
-    },
-    {
-        "state": "MO",
-        "state_name": "Missouri",
-        "runner_name": "",
-        "race_type": "Half Marathon",
-        "race_name": "Hospital Hill Run",
-        "race_date": "5/16/2026",
-        "finish_time": "",
-        "city": "Kansas City",
-        "notes": "",
-        "status": "Registered",
-    },
+    {"state":"NE","state_name":"Nebraska","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Lincoln Half Marathon","race_date":"2024-05-04","finish_time":"2:06:45","city":"Lincoln","notes":"","status":"Completed"},
+    {"state":"TX","state_name":"Texas","runner_name":"Rachel","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2024-12-15","finish_time":"2:05:35","city":"Dallas","notes":"","status":"Completed"},
+    {"state":"NV","state_name":"Nevada","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:22:16","city":"Las Vegas","notes":"","status":"Completed"},
+
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"Half Marathon","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"2:41:00","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"Half Marathon","race_name":"Lincoln Half Marathon","race_date":"2024-05-04","finish_time":"1:55:36","city":"Lincoln","notes":"","status":"Completed"},
+    {"state":"TX","state_name":"Texas","runner_name":"Tom","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2024-12-15","finish_time":"1:54:34","city":"Dallas","notes":"","status":"Completed"},
+    {"state":"NV","state_name":"Nevada","runner_name":"Tom","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:24:04","city":"Las Vegas","notes":"","status":"Completed"},
+
+    {"state":"NE","state_name":"Nebraska","runner_name":"Rachel","race_type":"10 Mile","race_name":"Early Bird Run","race_date":"2026-04-04","finish_time":"1:32:42","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"10 Mile","race_name":"Early Bird Run","race_date":"2024-04-06","finish_time":"1:31:21","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"10 Mile","race_name":"Early Bird Run","race_date":"2026-04-04","finish_time":"1:28:07","city":"Omaha","notes":"","status":"Completed"},
+
+    {"state":"NE","state_name":"Nebraska","runner_name":"Rachel","race_type":"5K","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"0:30:33","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"5K","race_name":"Gator Fun Run","race_date":"2026-04-25","finish_time":"0:24:30","city":"Omaha","notes":"","status":"Completed"},
+
+    {"state":"IN","state_name":"Indiana","runner_name":"Tom","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2026-05-02","finish_time":"1:53:20","city":"Indianapolis","notes":"","status":"Completed"},
+    {"state":"IN","state_name":"Indiana","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2026-05-02","finish_time":"2:01:40","city":"Indianapolis","notes":"","status":"Completed"},
+    {"state":"IN","state_name":"Indiana","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2026-05-02","finish_time":"2:20:50","city":"Indianapolis","notes":"","status":"Completed"},
+    {"state":"IN","state_name":"Indiana","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2019-05-04","finish_time":"2:41:43","city":"Indianapolis","notes":"","status":"Completed"},
+
+    {"state":"TX","state_name":"Texas","runner_name":"Olivia","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2025-12-14","finish_time":"2:27:28","city":"Dallas","notes":"","status":"Completed"},
+    {"state":"TX","state_name":"Texas","runner_name":"Olivia","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2024-12-15","finish_time":"2:18:01","city":"Dallas","notes":"","status":"Completed"},
+
+    {"state":"NE","state_name":"Nebraska","runner_name":"Olivia","race_type":"Half Marathon","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"2:26:17","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NV","state_name":"Nevada","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:20:47","city":"Las Vegas","notes":"","status":"Completed"},
+
+    {"state":"CO","state_name":"Colorado","runner_name":"","race_type":"Half Marathon","race_name":"All-Out Runapalooza","race_date":"2026-08-08","finish_time":"","city":"Denver","notes":"","status":"Interested"},
+    {"state":"MO","state_name":"Missouri","runner_name":"","race_type":"Half Marathon","race_name":"Hospital Hill Run","race_date":"2026-05-16","finish_time":"","city":"Kansas City","notes":"","status":"Registered"},
 ]
 
 DISTANCE_MILES = {
