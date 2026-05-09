@@ -693,6 +693,169 @@ col3.metric("States Interested", int((filtered_map_df["map_status"] == "Interest
 col4.metric("Total Entries", len(filtered_race_df))
 
 # -------------------------------------------------
+# Timeline layer
+# -------------------------------------------------
+st.subheader("Race Timeline")
+st.caption("Use this to see what has been completed, what is registered, and what is still only an idea.")
+
+if filtered_race_df.empty:
+    st.info("No race entries match the current filters.")
+else:
+    timeline_df = filtered_race_df.copy()
+    timeline_df["race_date"] = pd.to_datetime(timeline_df["race_date"], errors="coerce")
+    timeline_df = timeline_df.dropna(subset=["race_date"]).sort_values("race_date")
+    timeline_df["timeline_label"] = (
+        timeline_df["race_name"]
+        + " | "
+        + timeline_df["city"].fillna("")
+        + ", "
+        + timeline_df["state"]
+    )
+    timeline_df["days_from_today"] = (timeline_df["race_date"].dt.date - date.today()).apply(lambda x: x.days)
+    timeline_df["date_bucket"] = timeline_df["days_from_today"].apply(
+        lambda days: "Past" if days < 0 else "Today" if days == 0 else "Future"
+    )
+
+    completed_timeline_df = timeline_df[timeline_df["status"] == "Completed"].copy()
+    future_timeline_df = timeline_df[timeline_df["status"].isin(["Registered", "Interested"])].copy()
+    registered_future_df = future_timeline_df[future_timeline_df["status"] == "Registered"].copy()
+
+    next_registered = registered_future_df[registered_future_df["race_date"].dt.date >= date.today()].sort_values("race_date")
+    next_any_future = future_timeline_df[future_timeline_df["race_date"].dt.date >= date.today()].sort_values("race_date")
+
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Completed Entries", len(completed_timeline_df))
+    t2.metric("Registered Future", len(registered_future_df[registered_future_df["race_date"].dt.date >= date.today()]))
+    t3.metric("Interested Future", len(future_timeline_df[(future_timeline_df["status"] == "Interested") & (future_timeline_df["race_date"].dt.date >= date.today())]))
+
+    if not next_any_future.empty:
+        next_row = next_any_future.iloc[0]
+        t4.metric("Next Race", f"{int(next_row['days_from_today'])} days")
+    else:
+        t4.metric("Next Race", "None planned")
+
+    timeline_view = st.radio(
+        "Timeline View",
+        ["All", "Future Only", "Completed Only"],
+        horizontal=True,
+    )
+
+    if timeline_view == "Future Only":
+        timeline_chart_df = future_timeline_df.copy()
+    elif timeline_view == "Completed Only":
+        timeline_chart_df = completed_timeline_df.copy()
+    else:
+        timeline_chart_df = timeline_df.copy()
+
+    if timeline_chart_df.empty:
+        st.info("No timeline entries for this view.")
+    else:
+        fig_timeline = px.scatter(
+            timeline_chart_df,
+            x="race_date",
+            y="runner_name",
+            color="status",
+            symbol="race_type",
+            size="distance_miles",
+            hover_name="race_name",
+            hover_data={
+                "race_date": "|%Y-%m-%d",
+                "state_name": True,
+                "city": True,
+                "race_type": True,
+                "finish_time": True,
+                "avg_mile_pace": True,
+                "status": True,
+                "distance_miles": False,
+                "runner_name": False,
+            },
+            category_orders={"status": ["Completed", "Registered", "Interested"]},
+            title="Race Timeline by Runner",
+        )
+        fig_timeline.update_traces(marker=dict(line=dict(width=1, color="white")))
+        fig_timeline.update_layout(
+            height=420,
+            margin=dict(l=0, r=0, t=45, b=0),
+            xaxis_title="Race Date",
+            yaxis_title="Runner",
+            legend_title="Status / Race Type",
+        )
+        fig_timeline.add_vline(x=pd.Timestamp(date.today()), line_dash="dash")
+        st.plotly_chart(fig_timeline, use_container_width=True)
+
+    if not next_any_future.empty:
+        next_race = next_any_future.iloc[0]
+        st.info(
+            f"Next planned race: **{next_race['race_name']}** in **{next_race['city']}, {next_race['state']}** "
+            f"on **{next_race['race_date'].strftime('%Y-%m-%d')}** "
+            f"({int(next_race['days_from_today'])} days away, status: {next_race['status']})."
+        )
+
+    upcoming_display_df = next_any_future[
+        [
+            "status",
+            "runner_name",
+            "race_type",
+            "race_name",
+            "city",
+            "state",
+            "race_date_display",
+            "notes",
+        ]
+    ].rename(
+        columns={
+            "status": "Status",
+            "runner_name": "Runner",
+            "race_type": "Race Type",
+            "race_name": "Race Name",
+            "city": "City",
+            "state": "State",
+            "race_date_display": "Date",
+            "notes": "Notes",
+        }
+    )
+
+    completed_recent_df = completed_timeline_df.sort_values("race_date", ascending=False).head(10)[
+        [
+            "status",
+            "runner_name",
+            "race_type",
+            "race_name",
+            "city",
+            "state",
+            "race_date_display",
+            "finish_time",
+            "avg_mile_pace",
+        ]
+    ].rename(
+        columns={
+            "status": "Status",
+            "runner_name": "Runner",
+            "race_type": "Race Type",
+            "race_name": "Race Name",
+            "city": "City",
+            "state": "State",
+            "race_date_display": "Date",
+            "finish_time": "Finish Time",
+            "avg_mile_pace": "Avg Mile Pace",
+        }
+    )
+
+    upcoming_tab, completed_tab = st.tabs(["Upcoming / Planned", "Recent Completed"])
+
+    with upcoming_tab:
+        if upcoming_display_df.empty:
+            st.info("No upcoming registered or interested races yet.")
+        else:
+            st.dataframe(upcoming_display_df, use_container_width=True, hide_index=True)
+
+    with completed_tab:
+        if completed_recent_df.empty:
+            st.info("No completed races yet.")
+        else:
+            st.dataframe(completed_recent_df, use_container_width=True, hide_index=True)
+
+# -------------------------------------------------
 # Main map
 # -------------------------------------------------
 fig = px.choropleth(
@@ -862,4 +1025,5 @@ st.markdown("---")
 st.caption(
     "Next upgrade ideas: timeline layer, SQLite backend, Excel import, household/user accounts, medals/badges, public profiles, and monetized premium plans."
 )
+
 
