@@ -339,13 +339,13 @@ with map_page:
         projection_scale=1.28,
     )
     fig.update_layout(
-        height=750,
+        height=700,
         autosize=True,
         margin=dict(l=0, r=0, t=0, b=0),
         coloraxis_colorbar=dict(
             title="",
             orientation="h",
-            x=2,
+            x=1,
             xanchor="center",
             y=-0.03,
             len=0.65,
