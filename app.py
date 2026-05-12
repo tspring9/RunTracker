@@ -350,7 +350,7 @@ with map_page:
             xanchor="center",
             y=-0.03,
             len=0.65,
-            thickness=25,
+            thickness=9,
             tickvals=[0, 1, 2, 3],
             ticktext=["Empty", "Interested", "Registered", "Completed"],
         ),
