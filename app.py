@@ -66,15 +66,6 @@ STATE_CODE_LOOKUP = {name: code for code, name in ALL_STATES}
 STATUS_COLOR_VALUE = {"Empty": 0, "Interested": 1, "Registered": 2, "Completed": 3}
 STATUS_COLOR_SCALE = [[0.00, "#f1f5f9"], [0.33, "#d9ead3"], [0.66, "#fce5cd"], [1.00, "#6fa8dc"]]
 
-CITY_COORDS = {
-    "Omaha": (41.2565, -95.9345),
-    "Lincoln": (40.8136, -96.7026),
-    "Dallas": (32.7767, -96.7970),
-    "Las Vegas": (36.1716, -115.1391),
-    "Indianapolis": (39.7684, -86.1581),
-    "Kansas City": (39.0997, -94.5786),
-    "Denver": (39.7392, -104.9903),
-}
 
 # -------------------------------------------------
 # Helpers
@@ -247,20 +238,6 @@ def delete_race_entry(index: int):
     st.session_state.source_data = st.session_state.source_data.drop(index=index).reset_index(drop=True)
 
 
-def get_city_points(race_df: pd.DataFrame) -> pd.DataFrame:
-    if race_df.empty:
-        return pd.DataFrame(columns=["city", "state", "lat", "lon", "race_count"])
-    city_df = (
-        race_df.groupby(["city", "state"], dropna=False)
-        .agg(race_count=("race_name", "count"), runners=("runner_name", lambda s: ", ".join(sorted({x for x in s if x}))))
-        .reset_index()
-    )
-    city_df = city_df[city_df["city"].astype(str).str.strip() != ""].copy()
-    city_df["lat"] = city_df["city"].map(lambda c: CITY_COORDS.get(c, (None, None))[0])
-    city_df["lon"] = city_df["city"].map(lambda c: CITY_COORDS.get(c, (None, None))[1])
-    return city_df.dropna(subset=["lat", "lon"])
-
-
 def display_race_table(df: pd.DataFrame):
     if df.empty:
         st.info("No matching race entries.")
@@ -329,9 +306,40 @@ with map_page:
         range_color=(0, 3),
     )
     fig.update_traces(marker_line_color="white", marker_line_width=1)
-    fig.update_geos(fitbounds="locations", visible=False, projection_scale=1.18)
+
+    # -------------------------------------------------
+    # Main map mobile tuning
+    # -------------------------------------------------
+    # projection_scale:
+    #   Higher = zooms the US map larger.
+    #   Try 1.10 to 1.35. If Alaska/Hawaii or edges feel cramped, lower it.
+    #
+    # height:
+    #   Higher = gives the map more vertical space, especially helpful on mobile.
+    #   Try 560 to 700.
+    #
+    # coloraxis_colorbar:
+    #   This is the map key/legend. It is horizontal below the map so it does
+    #   not steal right-side width from the US map on mobile.
+    #
+    # y:
+    #   Controls how far below the map the legend sits.
+    #   Less negative, like -0.03, pulls it closer to the map.
+    #
+    # len:
+    #   Controls legend width as a percent of the chart width.
+    #   Smaller, like 0.60 to 0.70, takes less horizontal space.
+    #
+    # thickness:
+    #   Controls the height/thickness of the legend bar.
+    #   Smaller, like 7 to 9, is more compact on mobile.
+    fig.update_geos(
+        fitbounds="locations",
+        visible=False,
+        projection_scale=1.28,
+    )
     fig.update_layout(
-        height=560,
+        height=620,
         autosize=True,
         margin=dict(l=0, r=0, t=0, b=0),
         coloraxis_colorbar=dict(
@@ -339,9 +347,9 @@ with map_page:
             orientation="h",
             x=0.5,
             xanchor="center",
-            y=-0.06,
-            len=0.75,
-            thickness=10,
+            y=-0.03,
+            len=0.65,
+            thickness=8,
             tickvals=[0, 1, 2, 3],
             ticktext=["Empty", "Interested", "Registered", "Completed"],
         ),
@@ -350,21 +358,6 @@ with map_page:
 
     st.caption("The legend was moved below the map and made horizontal so the US map has more room on mobile.")
 
-    city_points = get_city_points(filtered_race_df)
-    if not city_points.empty:
-        st.markdown("#### City Race Bubbles")
-        city_fig = px.scatter_geo(
-            city_points,
-            lat="lat",
-            lon="lon",
-            size="race_count",
-            scope="usa",
-            hover_name="city",
-            hover_data={"lat": False, "lon": False, "state": True, "race_count": True, "runners": True},
-        )
-        city_fig.update_geos(fitbounds="locations", visible=False, projection_scale=1.1)
-        city_fig.update_layout(height=440, margin=dict(l=0, r=0, t=0, b=0), showlegend=False)
-        st.plotly_chart(city_fig, use_container_width=True)
 
     selected_state = None
     if selected and selected.get("selection") and selected["selection"].get("points"):
@@ -563,7 +556,5 @@ with manage_page:
 
 st.markdown("---")
 st.caption("Next upgrade ideas: SQLite backend, Excel import, household/user accounts, medals/badges, public profiles, and monetized premium plans.")
-
-
 
 
