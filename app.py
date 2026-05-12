@@ -346,10 +346,10 @@ with map_page:
         coloraxis_colorbar=dict(
             title="",
             orientation="h",
-            x=1,
+            x=0.5,
             xanchor="center",
             y=-0.03,
-            len=0.95,
+            len=0.65,
             thickness=8,
             tickvals=[0, 1, 2, 3],
             ticktext=["Empty", "Interested", "Registered", "Completed"],
