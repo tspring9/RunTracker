@@ -345,7 +345,7 @@ with map_page:
         coloraxis_colorbar=dict(
             title="",
             orientation="h",
-            x=-0.5,
+            x=1,
             xanchor="center",
             y=-0.03,
             len=0.65,
