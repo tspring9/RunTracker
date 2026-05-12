@@ -340,7 +340,7 @@ with map_page:
     center={"lat": 38.5, "lon": -96}
     )
     fig.update_layout(
-        height=620,
+        height=800,
         autosize=True,
         margin=dict(l=0, r=0, t=0, b=0),
         coloraxis_colorbar=dict(
