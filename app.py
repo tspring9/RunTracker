@@ -1,158 +1,37 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import datetime, date
+from datetime import date
 
 st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 
 # -------------------------------------------------
 # Sample preloaded data
 # -------------------------------------------------
+# Restored from your current sample CSV/app data.
 SAMPLE_DATA = [
-    {
-        "state": "IL",
-        "state_name": "Illinois",
-        "runner_name": "Tom",
-        "race_type": "Half Marathon",
-        "race_name": "Chicago Spring Half",
-        "race_date": "2025-04-13",
-        "finish_time": "1:49:32",
-        "city": "Chicago",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "IL",
-        "state_name": "Illinois",
-        "runner_name": "Wife",
-        "race_type": "10K",
-        "race_name": "Lakefront 10K",
-        "race_date": "2024-09-21",
-        "finish_time": "0:58:14",
-        "city": "Chicago",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "WI",
-        "state_name": "Wisconsin",
-        "runner_name": "Tom",
-        "race_type": "5K",
-        "race_name": "Madison Summer 5K",
-        "race_date": "2024-06-15",
-        "finish_time": "0:24:48",
-        "city": "Madison",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "WI",
-        "state_name": "Wisconsin",
-        "runner_name": "Wife",
-        "race_type": "Half Marathon",
-        "race_name": "Door County Half",
-        "race_date": "2025-05-04",
-        "finish_time": "2:03:45",
-        "city": "Door County",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "MN",
-        "state_name": "Minnesota",
-        "runner_name": "Tom",
-        "race_type": "10K",
-        "race_name": "Twin Cities 10K",
-        "race_date": "2023-10-01",
-        "finish_time": "0:49:35",
-        "city": "Minneapolis",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "MN",
-        "state_name": "Minnesota",
-        "runner_name": "Wife",
-        "race_type": "5K",
-        "race_name": "St. Paul Classic 5K",
-        "race_date": "2023-08-11",
-        "finish_time": "0:27:50",
-        "city": "St. Paul",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "TX",
-        "state_name": "Texas",
-        "runner_name": "Tom",
-        "race_type": "Half Marathon",
-        "race_name": "Austin Half",
-        "race_date": "2025-02-16",
-        "finish_time": "1:46:58",
-        "city": "Austin",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "TX",
-        "state_name": "Texas",
-        "runner_name": "Wife",
-        "race_type": "10K",
-        "race_name": "Dallas Dash 10K",
-        "race_date": "2025-03-08",
-        "finish_time": "0:56:40",
-        "city": "Dallas",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "CO",
-        "state_name": "Colorado",
-        "runner_name": "Tom",
-        "race_type": "5K",
-        "race_name": "Denver Peaks 5K",
-        "race_date": "2024-07-20",
-        "finish_time": "0:23:59",
-        "city": "Denver",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "CO",
-        "state_name": "Colorado",
-        "runner_name": "Wife",
-        "race_type": "Half Marathon",
-        "race_name": "Boulder Half",
-        "race_date": "2024-09-14",
-        "finish_time": "2:01:15",
-        "city": "Boulder",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "FL",
-        "state_name": "Florida",
-        "runner_name": "Tom",
-        "race_type": "10K",
-        "race_name": "Orlando 10K",
-        "race_date": "2023-12-02",
-        "finish_time": "0:50:22",
-        "city": "Orlando",
-        "notes": "",
-        "status": "Completed",
-    },
-    {
-        "state": "FL",
-        "state_name": "Florida",
-        "runner_name": "Wife",
-        "race_type": "5K",
-        "race_name": "Sunrise 5K",
-        "race_date": "2023-12-02",
-        "finish_time": "0:29:18",
-        "city": "Orlando",
-        "notes": "",
-        "status": "Completed",
-    },
+    {"state":"NE","state_name":"Nebraska","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Lincoln Half Marathon","race_date":"2024-05-04","finish_time":"2:06:45","city":"Lincoln","notes":"","status":"Completed"},
+    {"state":"TX","state_name":"Texas","runner_name":"Rachel","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2024-12-15","finish_time":"2:05:35","city":"Dallas","notes":"","status":"Completed"},
+    {"state":"NV","state_name":"Nevada","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:22:16","city":"Las Vegas","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"Half Marathon","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"2:41:00","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"Half Marathon","race_name":"Lincoln Half Marathon","race_date":"2024-05-04","finish_time":"1:55:36","city":"Lincoln","notes":"","status":"Completed"},
+    {"state":"TX","state_name":"Texas","runner_name":"Tom","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2024-12-15","finish_time":"1:54:34","city":"Dallas","notes":"","status":"Completed"},
+    {"state":"NV","state_name":"Nevada","runner_name":"Tom","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:24:04","city":"Las Vegas","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Rachel","race_type":"10 Mile","race_name":"Early Bird Run","race_date":"2026-04-04","finish_time":"1:32:42","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"10 Mile","race_name":"Early Bird Run","race_date":"2024-04-06","finish_time":"1:31:21","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"10 Mile","race_name":"Early Bird Run","race_date":"2026-04-04","finish_time":"1:28:07","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Rachel","race_type":"5K","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"0:30:33","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"5K","race_name":"Gator Fun Run","race_date":"2026-04-25","finish_time":"0:24:30","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"IN","state_name":"Indiana","runner_name":"Tom","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2026-05-02","finish_time":"1:53:20","city":"Indianapolis","notes":"","status":"Completed"},
+    {"state":"IN","state_name":"Indiana","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2026-05-02","finish_time":"2:01:40","city":"Indianapolis","notes":"","status":"Completed"},
+    {"state":"IN","state_name":"Indiana","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2026-05-02","finish_time":"2:20:50","city":"Indianapolis","notes":"","status":"Completed"},
+    {"state":"IN","state_name":"Indiana","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2019-05-04","finish_time":"2:41:43","city":"Indianapolis","notes":"","status":"Completed"},
+    {"state":"TX","state_name":"Texas","runner_name":"Olivia","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2025-12-14","finish_time":"2:27:28","city":"Dallas","notes":"","status":"Completed"},
+    {"state":"TX","state_name":"Texas","runner_name":"Olivia","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2024-12-15","finish_time":"2:18:01","city":"Dallas","notes":"","status":"Completed"},
+    {"state":"NE","state_name":"Nebraska","runner_name":"Olivia","race_type":"Half Marathon","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"2:26:17","city":"Omaha","notes":"","status":"Completed"},
+    {"state":"NV","state_name":"Nevada","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:20:47","city":"Las Vegas","notes":"","status":"Completed"},
+    {"state":"CO","state_name":"Colorado","runner_name":"","race_type":"Half Marathon","race_name":"All-Out Runapalooza","race_date":"2026-08-08","finish_time":"","city":"Denver","notes":"","status":"Interested"},
+    {"state":"MO","state_name":"Missouri","runner_name":"","race_type":"Half Marathon","race_name":"Hospital Hill Run","race_date":"2026-05-16","finish_time":"","city":"Kansas City","notes":"","status":"Registered"},
 ]
 
 DISTANCE_MILES = {
@@ -178,43 +57,23 @@ ALL_STATES = [
     ("WI", "Wisconsin"), ("WY", "Wyoming"),
 ]
 
-REQUIRED_COLUMNS = [
-    "state",
-    "state_name",
-    "runner_name",
-    "race_type",
-    "race_name",
-    "race_date",
-    "finish_time",
-    "city",
-    "notes",
-    "status",
-]
-
+REQUIRED_COLUMNS = ["state", "state_name", "runner_name", "race_type", "race_name", "race_date", "finish_time", "city", "notes", "status"]
 VALID_RACE_TYPES = ["5K", "10K", "10 Mile", "Half Marathon"]
 VALID_STATUSES = ["Completed", "Registered", "Interested"]
 VALID_STATE_CODES = {code for code, _ in ALL_STATES}
 STATE_NAME_LOOKUP = {code: name for code, name in ALL_STATES}
 STATE_CODE_LOOKUP = {name: code for code, name in ALL_STATES}
 STATUS_COLOR_VALUE = {"Empty": 0, "Interested": 1, "Registered": 2, "Completed": 3}
-STATUS_COLOR_SCALE = [
-    [0.00, "#f1f5f9"],
-    [0.33, "#d9ead3"],
-    [0.66, "#fce5cd"],
-    [1.00, "#6fa8dc"],
-]
+STATUS_COLOR_SCALE = [[0.00, "#f1f5f9"], [0.33, "#d9ead3"], [0.66, "#fce5cd"], [1.00, "#6fa8dc"]]
 
 CITY_COORDS = {
-    "Chicago": (41.8781, -87.6298),
-    "Madison": (43.0731, -89.4012),
-    "Door County": (44.8331, -87.3770),
-    "Minneapolis": (44.9778, -93.2650),
-    "St. Paul": (44.9537, -93.0900),
-    "Austin": (30.2672, -97.7431),
+    "Omaha": (41.2565, -95.9345),
+    "Lincoln": (40.8136, -96.7026),
     "Dallas": (32.7767, -96.7970),
+    "Las Vegas": (36.1716, -115.1391),
+    "Indianapolis": (39.7684, -86.1581),
+    "Kansas City": (39.0997, -94.5786),
     "Denver": (39.7392, -104.9903),
-    "Boulder": (40.0150, -105.2705),
-    "Orlando": (28.5383, -81.3792),
 }
 
 # -------------------------------------------------
@@ -240,9 +99,7 @@ def normalize_source_df(df: pd.DataFrame) -> pd.DataFrame:
     for col in REQUIRED_COLUMNS:
         if col not in df.columns:
             df[col] = "Completed" if col == "status" else ""
-
-    df = df[REQUIRED_COLUMNS]
-    df = df.dropna(how="all").copy()
+    df = df[REQUIRED_COLUMNS].dropna(how="all").copy()
     df["state"] = df["state"].fillna("").astype(str).str.strip().str.upper()
     df["state_name"] = df["state"].map(STATE_NAME_LOOKUP).fillna(df["state_name"])
     df["runner_name"] = df["runner_name"].fillna("").astype(str).str.strip()
@@ -268,17 +125,6 @@ def time_to_seconds(time_str: str) -> int:
     else:
         raise ValueError(f"Invalid time format: {time_str}")
     return hours * 3600 + minutes * 60 + seconds
-
-
-def seconds_to_hms(total_seconds: int) -> str:
-    total_seconds = int(total_seconds)
-    hours = total_seconds // 3600
-    remainder = total_seconds % 3600
-    minutes = remainder // 60
-    seconds = remainder % 60
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
-    return f"{minutes}:{seconds:02d}"
 
 
 def seconds_to_pace(total_seconds: float, miles: float) -> str:
@@ -311,7 +157,7 @@ def validate_uploaded_csv(df: pd.DataFrame):
     try:
         pd.to_datetime(check_df["race_date"], errors="raise")
     except Exception:
-        errors.append("One or more race_date values are invalid. Use YYYY-MM-DD.")
+        errors.append("One or more race_date values are invalid. Use YYYY-MM-DD or a standard date format.")
 
     completed_rows = check_df[check_df["status"] == "Completed"].copy()
     for i, value in completed_rows["finish_time"].items():
@@ -327,7 +173,6 @@ def prepare_race_df(source_df: pd.DataFrame) -> pd.DataFrame:
     df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
     df["distance_miles"] = df["race_type"].map(DISTANCE_MILES)
     df["finish_seconds"] = pd.NA
-
     completed_mask = df["status"] == "Completed"
     df.loc[completed_mask, "finish_seconds"] = df.loc[completed_mask, "finish_time"].astype(str).apply(time_to_seconds)
     df["avg_mile_pace"] = df.apply(lambda row: seconds_to_pace(row["finish_seconds"], row["distance_miles"]), axis=1)
@@ -404,56 +249,24 @@ def delete_race_entry(index: int):
 
 def get_city_points(race_df: pd.DataFrame) -> pd.DataFrame:
     if race_df.empty:
-        return pd.DataFrame(columns=["city", "state", "lat", "lon", "race_count", "hover_text"])
-
+        return pd.DataFrame(columns=["city", "state", "lat", "lon", "race_count"])
     city_df = (
         race_df.groupby(["city", "state"], dropna=False)
-        .agg(race_count=("race_name", "count"), runners=("runner_name", lambda s: ", ".join(sorted(set(s)))), statuses=("status", lambda s: ", ".join(sorted(set(s)))))
+        .agg(race_count=("race_name", "count"), runners=("runner_name", lambda s: ", ".join(sorted({x for x in s if x}))))
         .reset_index()
     )
     city_df = city_df[city_df["city"].astype(str).str.strip() != ""].copy()
     city_df["lat"] = city_df["city"].map(lambda c: CITY_COORDS.get(c, (None, None))[0])
     city_df["lon"] = city_df["city"].map(lambda c: CITY_COORDS.get(c, (None, None))[1])
-    city_df = city_df.dropna(subset=["lat", "lon"])
-    city_df["hover_text"] = city_df.apply(
-        lambda r: f"{r['city']}, {r['state']}<br>Races: {r['race_count']}<br>Runners: {r['runners']}<br>Status: {r['statuses']}",
-        axis=1,
-    )
-    return city_df
+    return city_df.dropna(subset=["lat", "lon"])
 
 
 def display_race_table(df: pd.DataFrame):
     if df.empty:
         st.info("No matching race entries.")
         return
-    display_df = df[
-        [
-            "status",
-            "state",
-            "state_name",
-            "runner_name",
-            "race_type",
-            "race_name",
-            "city",
-            "race_date_display",
-            "finish_time",
-            "avg_mile_pace",
-            "notes",
-        ]
-    ].rename(
-        columns={
-            "status": "Status",
-            "state": "State",
-            "state_name": "State Name",
-            "runner_name": "Runner",
-            "race_type": "Race Type",
-            "race_name": "Race Name",
-            "city": "City",
-            "race_date_display": "Date",
-            "finish_time": "Finish Time",
-            "avg_mile_pace": "Avg Mile Pace",
-            "notes": "Notes",
-        }
+    display_df = df[["status", "state", "state_name", "runner_name", "race_type", "race_name", "city", "race_date_display", "finish_time", "avg_mile_pace", "notes"]].rename(
+        columns={"status": "Status", "state": "State", "state_name": "State Name", "runner_name": "Runner", "race_type": "Race Type", "race_name": "Race Name", "city": "City", "race_date_display": "Date", "finish_time": "Finish Time", "avg_mile_pace": "Avg Mile Pace", "notes": "Notes"}
     )
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
@@ -478,7 +291,6 @@ with st.sidebar:
     st.title("Filters")
     runner_options = sorted(race_df["runner_name"].dropna().unique())
     race_type_options = sorted(race_df["race_type"].dropna().unique())
-
     runner_filter = st.multiselect("Runner", options=runner_options, default=runner_options)
     race_type_filter = st.multiselect("Race Type", options=race_type_options, default=race_type_options)
     status_filter = st.multiselect("Status", options=VALID_STATUSES, default=VALID_STATUSES)
@@ -496,7 +308,6 @@ col2.metric("States Registered", int((filtered_map_df["map_status"] == "Register
 col3.metric("States Interested", int((filtered_map_df["map_status"] == "Interested").sum()))
 col4.metric("Total Entries", len(filtered_race_df))
 
-# Three mobile-friendly sections.
 map_page, graphs_page, manage_page = st.tabs(["🗺️ Map", "📊 Graphs", "🛠️ Data Management"])
 
 # -------------------------------------------------
@@ -504,7 +315,7 @@ map_page, graphs_page, manage_page = st.tabs(["🗺️ Map", "📊 Graphs", "�
 # -------------------------------------------------
 with map_page:
     st.subheader("US Map")
-    st.caption("Map priority: Completed beats Registered, Registered beats Interested, and states with no entries stay blank.")
+    st.caption("Status priority: Completed beats Registered, Registered beats Interested, and empty states stay blank.")
 
     fig = px.choropleth(
         filtered_map_df,
@@ -513,30 +324,31 @@ with map_page:
         color="color_value",
         scope="usa",
         hover_name="state_name",
-        hover_data={
-            "state": False,
-            "color_value": False,
-            "total_races": True,
-            "completed_races": True,
-            "registered_races": True,
-            "interested_races": True,
-            "map_status": True,
-        },
+        hover_data={"state": False, "color_value": False, "map_status": True, "total_races": True, "completed_races": True, "registered_races": True, "interested_races": True},
         color_continuous_scale=STATUS_COLOR_SCALE,
         range_color=(0, 3),
     )
+    fig.update_traces(marker_line_color="white", marker_line_width=1)
+    fig.update_geos(fitbounds="locations", visible=False, projection_scale=1.18)
     fig.update_layout(
-        margin=dict(l=0, r=0, t=10, b=0),
+        height=560,
+        autosize=True,
+        margin=dict(l=0, r=0, t=0, b=0),
         coloraxis_colorbar=dict(
-            title="Status",
+            title="",
+            orientation="h",
+            x=0.5,
+            xanchor="center",
+            y=-0.06,
+            len=0.75,
+            thickness=10,
             tickvals=[0, 1, 2, 3],
             ticktext=["Empty", "Interested", "Registered", "Completed"],
         ),
-        height=520,
     )
-    fig.update_traces(marker_line_color="white", marker_line_width=1)
-
     selected = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points")
+
+    st.caption("The legend was moved below the map and made horizontal so the US map has more room on mobile.")
 
     city_points = get_city_points(filtered_race_df)
     if not city_points.empty:
@@ -548,11 +360,11 @@ with map_page:
             size="race_count",
             scope="usa",
             hover_name="city",
-            hover_data={"lat": False, "lon": False, "state": True, "race_count": True},
+            hover_data={"lat": False, "lon": False, "state": True, "race_count": True, "runners": True},
         )
-        city_fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=420)
+        city_fig.update_geos(fitbounds="locations", visible=False, projection_scale=1.1)
+        city_fig.update_layout(height=440, margin=dict(l=0, r=0, t=0, b=0), showlegend=False)
         st.plotly_chart(city_fig, use_container_width=True)
-        st.caption("Cities need coordinates in CITY_COORDS before they can appear as bubbles. Add more city coordinates as your real CSV grows.")
 
     selected_state = None
     if selected and selected.get("selection") and selected["selection"].get("points"):
@@ -562,7 +374,6 @@ with map_page:
     state_options = ["Select a state..."] + [name for _, name in ALL_STATES]
     state_name_to_code = {name: code for code, name in ALL_STATES}
     code_to_state_name = {code: name for code, name in ALL_STATES}
-
     default_index = 0
     if selected_state:
         default_state_name = code_to_state_name.get(selected_state)
@@ -580,9 +391,9 @@ with map_page:
             st.info("No matching race data for this state under the current filters.")
         else:
             s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Entries in State", len(state_runs))
+            s1.metric("Entries", len(state_runs))
             s2.metric("Completed", int((state_runs["status"] == "Completed").sum()))
-            s3.metric("Future", int((state_runs["status"].isin(["Registered", "Interested"])).sum()))
+            s3.metric("Future", int(state_runs["status"].isin(["Registered", "Interested"]).sum()))
             s4.metric("Best Time", best_time_for_group(state_runs))
             display_race_table(state_runs)
     else:
@@ -593,7 +404,6 @@ with map_page:
 # -------------------------------------------------
 with graphs_page:
     st.subheader("Race Charts")
-
     if filtered_race_df.empty:
         st.info("No data available for the selected filters.")
     else:
@@ -628,15 +438,7 @@ with graphs_page:
             st.info("No upcoming registered or interested races found.")
         else:
             upcoming_display = upcoming_df[["status", "runner_name", "race_type", "race_name", "city", "state", "race_date_display"]].rename(
-                columns={
-                    "status": "Status",
-                    "runner_name": "Runner",
-                    "race_type": "Race Type",
-                    "race_name": "Race Name",
-                    "city": "City",
-                    "state": "State",
-                    "race_date_display": "Date",
-                }
+                columns={"status": "Status", "runner_name": "Runner", "race_type": "Race Type", "race_name": "Race Name", "city": "City", "state": "State", "race_date_display": "Date"}
             )
             st.dataframe(upcoming_display, use_container_width=True, hide_index=True)
 
@@ -650,24 +452,11 @@ with manage_page:
     st.subheader("Data Management")
     st.markdown("Download a blank template, export current data, or upload a CSV to replace the current session data.")
 
-    template_df = build_template_df()
-    current_df = st.session_state.source_data.copy()
-
     c1, c2 = st.columns(2)
     with c1:
-        st.download_button(
-            label="Download Blank CSV Template",
-            data=template_df.to_csv(index=False).encode("utf-8"),
-            file_name="race_results_template.csv",
-            mime="text/csv",
-        )
+        st.download_button("Download Blank CSV Template", data=build_template_df().to_csv(index=False).encode("utf-8"), file_name="race_results_template.csv", mime="text/csv")
     with c2:
-        st.download_button(
-            label="Download Current Data",
-            data=current_df.to_csv(index=False).encode("utf-8"),
-            file_name="race_results_current.csv",
-            mime="text/csv",
-        )
+        st.download_button("Download Current Data", data=st.session_state.source_data.to_csv(index=False).encode("utf-8"), file_name="race_results_current.csv", mime="text/csv")
 
     uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
     if uploaded_file is not None:
@@ -688,7 +477,6 @@ with manage_page:
 
     st.divider()
     st.subheader("Add One Race")
-
     with st.form("add_race_form", clear_on_submit=True):
         a1, a2, a3 = st.columns(3)
         with a1:
@@ -703,11 +491,9 @@ with manage_page:
             add_status = st.selectbox("Status", VALID_STATUSES)
             add_finish_time = st.text_input("Finish Time", placeholder="Required only for completed races")
             add_notes = st.text_area("Notes", height=100)
-
-        add_submitted = st.form_submit_button("Add Race")
-        if add_submitted:
-            if not add_runner_name.strip():
-                st.error("Runner Name is required.")
+        if st.form_submit_button("Add Race"):
+            if not add_runner_name.strip() and add_status == "Completed":
+                st.error("Runner Name is required for completed races.")
             elif not add_race_name.strip():
                 st.error("Race Name is required.")
             elif add_status == "Completed" and not add_finish_time.strip():
@@ -719,40 +505,21 @@ with manage_page:
                     except Exception:
                         st.error("Finish Time must use MM:SS or H:MM:SS format.")
                         st.stop()
-
                 state_code = STATE_CODE_LOOKUP[add_state_name]
-                add_race_entry(
-                    {
-                        "state": state_code,
-                        "state_name": add_state_name,
-                        "runner_name": add_runner_name,
-                        "race_type": add_race_type,
-                        "race_name": add_race_name,
-                        "race_date": add_race_date.strftime("%Y-%m-%d"),
-                        "finish_time": add_finish_time,
-                        "city": add_city,
-                        "notes": add_notes,
-                        "status": add_status,
-                    }
-                )
+                add_race_entry({"state": state_code, "state_name": add_state_name, "runner_name": add_runner_name, "race_type": add_race_type, "race_name": add_race_name, "race_date": add_race_date.strftime("%Y-%m-%d"), "finish_time": add_finish_time, "city": add_city, "notes": add_notes, "status": add_status})
                 st.success("Race added.")
                 st.rerun()
 
     st.divider()
     st.subheader("Edit or Delete an Existing Race")
-
     editable_df = st.session_state.source_data.copy().reset_index(drop=True)
     if editable_df.empty:
         st.info("No race entries to edit yet.")
     else:
-        entry_labels = [
-            f"{idx}: {row['race_date']} | {row['state']} | {row['runner_name']} | {row['race_name']} | {row['status']}"
-            for idx, row in editable_df.iterrows()
-        ]
+        entry_labels = [f"{idx}: {row['race_date']} | {row['state']} | {row['runner_name']} | {row['race_name']} | {row['status']}" for idx, row in editable_df.iterrows()]
         selected_label = st.selectbox("Select Entry", entry_labels)
         selected_index = int(selected_label.split(":", 1)[0])
         selected_row = editable_df.loc[selected_index]
-
         parsed_date = pd.to_datetime(selected_row["race_date"], errors="coerce")
         default_date = parsed_date.date() if not pd.isna(parsed_date) else date.today()
         all_state_names = [name for _, name in ALL_STATES]
@@ -764,30 +531,16 @@ with manage_page:
                 edit_race_name = st.text_input("Race Name", value=selected_row["race_name"])
                 edit_race_date = st.date_input("Race Date", value=default_date, key="edit_race_date")
             with e2:
-                edit_state_name = st.selectbox(
-                    "State",
-                    all_state_names,
-                    index=all_state_names.index(selected_row["state_name"]) if selected_row["state_name"] in all_state_names else 0,
-                )
+                edit_state_name = st.selectbox("State", all_state_names, index=all_state_names.index(selected_row["state_name"]) if selected_row["state_name"] in all_state_names else 0)
                 edit_city = st.text_input("City", value=selected_row["city"])
-                edit_race_type = st.selectbox(
-                    "Race Type",
-                    VALID_RACE_TYPES,
-                    index=VALID_RACE_TYPES.index(selected_row["race_type"]) if selected_row["race_type"] in VALID_RACE_TYPES else 0,
-                )
+                edit_race_type = st.selectbox("Race Type", VALID_RACE_TYPES, index=VALID_RACE_TYPES.index(selected_row["race_type"]) if selected_row["race_type"] in VALID_RACE_TYPES else 0)
             with e3:
-                edit_status = st.selectbox(
-                    "Status",
-                    VALID_STATUSES,
-                    index=VALID_STATUSES.index(selected_row["status"]) if selected_row["status"] in VALID_STATUSES else 0,
-                )
+                edit_status = st.selectbox("Status", VALID_STATUSES, index=VALID_STATUSES.index(selected_row["status"]) if selected_row["status"] in VALID_STATUSES else 0)
                 edit_finish_time = st.text_input("Finish Time", value=selected_row["finish_time"])
                 edit_notes = st.text_area("Notes", value=selected_row["notes"], height=100)
-
-            save_submitted = st.form_submit_button("Save Changes")
-            if save_submitted:
-                if not edit_runner_name.strip():
-                    st.error("Runner Name is required.")
+            if st.form_submit_button("Save Changes"):
+                if not edit_runner_name.strip() and edit_status == "Completed":
+                    st.error("Runner Name is required for completed races.")
                 elif not edit_race_name.strip():
                     st.error("Race Name is required.")
                 elif edit_status == "Completed" and not edit_finish_time.strip():
@@ -799,26 +552,10 @@ with manage_page:
                         except Exception:
                             st.error("Finish Time must use MM:SS or H:MM:SS format.")
                             st.stop()
-
                     state_code = STATE_CODE_LOOKUP[edit_state_name]
-                    update_race_entry(
-                        selected_index,
-                        {
-                            "state": state_code,
-                            "state_name": edit_state_name,
-                            "runner_name": edit_runner_name,
-                            "race_type": edit_race_type,
-                            "race_name": edit_race_name,
-                            "race_date": edit_race_date.strftime("%Y-%m-%d"),
-                            "finish_time": edit_finish_time,
-                            "city": edit_city,
-                            "notes": edit_notes,
-                            "status": edit_status,
-                        },
-                    )
+                    update_race_entry(selected_index, {"state": state_code, "state_name": edit_state_name, "runner_name": edit_runner_name, "race_type": edit_race_type, "race_name": edit_race_name, "race_date": edit_race_date.strftime("%Y-%m-%d"), "finish_time": edit_finish_time, "city": edit_city, "notes": edit_notes, "status": edit_status})
                     st.success("Race updated.")
                     st.rerun()
-
         if st.button("Delete Selected Entry", type="secondary"):
             delete_race_entry(selected_index)
             st.success("Race deleted.")
