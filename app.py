@@ -336,7 +336,7 @@ with map_page:
     fig.update_geos(
     scope="usa",
     visible=False,
-    projection_scale=1.30,
+    projection_scale=1.1,
     center={"lat": 38.5, "lon": -96}
     )
     fig.update_layout(
