@@ -340,7 +340,7 @@ with map_page:
     center={"lat": 38.5, "lon": -96}
     )
     fig.update_layout(
-        height=750,
+        height=800,
         autosize=True,
         margin=dict(l=0, r=0, t=0, b=0),
         coloraxis_colorbar=dict(
@@ -350,7 +350,7 @@ with map_page:
             xanchor="center",
             y=-0.03,
             len=0.65,
-            thickness=8,
+            thickness=25,
             tickvals=[0, 1, 2, 3],
             ticktext=["Empty", "Interested", "Registered", "Completed"],
         ),
