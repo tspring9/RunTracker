@@ -566,3 +566,4 @@ st.caption("Next upgrade ideas: SQLite backend, Excel import, household/user acc
 
 
 
+
