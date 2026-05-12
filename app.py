@@ -334,9 +334,10 @@ with map_page:
     #   Controls the height/thickness of the legend bar.
     #   Smaller, like 7 to 9, is more compact on mobile.
     fig.update_geos(
-        fitbounds="locations",
-        visible=False,
-        projection_scale=1.28,
+    scope="usa",
+    visible=False,
+    projection_scale=1.30,
+    center={"lat": 38.5, "lon": -96}
     )
     fig.update_layout(
         height=700,
