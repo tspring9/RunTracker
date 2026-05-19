@@ -31,7 +31,8 @@ SAMPLE_DATA = [
     {"state":"NE","state_name":"Nebraska","runner_name":"Olivia","race_type":"Half Marathon","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"2:26:17","city":"Omaha","notes":"","status":"Completed"},
     {"state":"NV","state_name":"Nevada","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:20:47","city":"Las Vegas","notes":"","status":"Completed"},
     {"state":"CO","state_name":"Colorado","runner_name":"","race_type":"Half Marathon","race_name":"All-Out Runapalooza","race_date":"2026-08-08","finish_time":"","city":"Denver","notes":"","status":"Interested"},
-    {"state":"MO","state_name":"Missouri","runner_name":"","race_type":"Half Marathon","race_name":"Hospital Hill Run","race_date":"2026-05-16","finish_time":"","city":"Kansas City","notes":"","status":"Registered"},
+    {"state":"MO","state_name":"Missouri","runner_name":"Tom","race_type":"Half Marathon","race_name":"Hospital Hill Run","race_date":"2026-05-16","finish_time":"1:56:24","city":"Kansas City","notes":"","status":"Completed"},
+    {"state":"MO","state_name":"Missouri","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Hospital Hill Run","race_date":"2026-05-16","finish_time":"2:09:57","city":"Kansas City","notes":"","status":"Completed"},
 ]
 
 DISTANCE_MILES = {
