@@ -1,22 +1,24 @@
 import os
-from datetime import date, timedelta
-
-import pandas as pd
-import plotly.express as px
 import requests
 import streamlit as st
+import pandas as pd
+import plotly.express as px
+from datetime import date, timedelta
 
 st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 
 # -------------------------------------------------
-# RunSignup API settings
+# RunSignUp API settings
 # -------------------------------------------------
+# Recommended: add these to Streamlit secrets instead of hard-coding them.
+# .streamlit/secrets.toml
+# RUNSIGNUP_API_KEY="your_key_here"
+# RUNSIGNUP_API_SECRET="your_secret_here"
 RUNSIGNUP_API_URL = "https://api.runsignup.com/rest/races"
-RUNSIGNUP_TEST_STATES = ["CO", "SD"]
 
 
 def get_secret(name: str, default: str = "") -> str:
-    """Read from Streamlit secrets first, then environment variables."""
+    """Read a secret from Streamlit secrets first, then environment variables."""
     try:
         if name in st.secrets:
             return str(st.secrets[name])
@@ -54,7 +56,13 @@ SAMPLE_DATA = [
     {"state":"MO","state_name":"Missouri","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Hospital Hill Run","race_date":"2026-05-16","finish_time":"2:09:57","city":"Kansas City","notes":"","status":"Completed"},
 ]
 
-DISTANCE_MILES = {"5K": 3.10686, "10K": 6.21371, "10 Mile": 10, "Half Marathon": 13.1094}
+DISTANCE_MILES = {
+    "5K": 3.10686,
+    "10K": 6.21371,
+    "10 Mile": 10,
+    "Half Marathon": 13.1094,
+}
+
 ALL_STATES = [
     ("AL", "Alabama"), ("AK", "Alaska"), ("AZ", "Arizona"), ("AR", "Arkansas"),
     ("CA", "California"), ("CO", "Colorado"), ("CT", "Connecticut"), ("DE", "Delaware"),
@@ -71,7 +79,10 @@ ALL_STATES = [
     ("WI", "Wisconsin"), ("WY", "Wyoming"),
 ]
 
-REQUIRED_COLUMNS = ["state", "state_name", "runner_name", "race_type", "race_name", "race_date", "finish_time", "city", "notes", "status"]
+REQUIRED_COLUMNS = [
+    "state", "state_name", "runner_name", "race_type", "race_name",
+    "race_date", "finish_time", "city", "notes", "status"
+]
 VALID_RACE_TYPES = ["5K", "10K", "10 Mile", "Half Marathon"]
 VALID_STATUSES = ["Completed", "Registered", "Interested"]
 VALID_STATE_CODES = {code for code, _ in ALL_STATES}
@@ -80,12 +91,15 @@ STATE_CODE_LOOKUP = {name: code for code, name in ALL_STATES}
 STATUS_COLOR_VALUE = {"Empty": 0, "Interested": 1, "Registered": 2, "Completed": 3}
 STATUS_COLOR_SCALE = [[0.00, "#f1f5f9"], [0.33, "#d9ead3"], [0.66, "#fce5cd"], [1.00, "#6fa8dc"]]
 
-
 # -------------------------------------------------
 # Helpers
 # -------------------------------------------------
 def build_template_df():
     return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+
+def build_sample_df():
+    return normalize_source_df(pd.DataFrame(SAMPLE_DATA))
 
 
 def normalize_status(value):
@@ -103,14 +117,15 @@ def normalize_source_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df[REQUIRED_COLUMNS].dropna(how="all").copy()
     df["state"] = df["state"].fillna("").astype(str).str.strip().str.upper()
     df["state_name"] = df["state"].map(STATE_NAME_LOOKUP).fillna(df["state_name"])
-    for col in ["runner_name", "race_type", "race_name", "race_date", "finish_time", "city", "notes"]:
-        df[col] = df[col].fillna("").astype(str).str.strip()
+    df["runner_name"] = df["runner_name"].fillna("").astype(str).str.strip()
+    df["race_type"] = df["race_type"].fillna("").astype(str).str.strip()
+    df["race_name"] = df["race_name"].fillna("").astype(str).str.strip()
+    df["race_date"] = df["race_date"].fillna("").astype(str).str.strip()
+    df["finish_time"] = df["finish_time"].fillna("").astype(str).str.strip()
+    df["city"] = df["city"].fillna("").astype(str).str.strip()
+    df["notes"] = df["notes"].fillna("").astype(str).str.strip()
     df["status"] = df["status"].apply(normalize_status)
     return df
-
-
-def build_sample_df():
-    return normalize_source_df(pd.DataFrame(SAMPLE_DATA))
 
 
 def time_to_seconds(time_str: str) -> int:
@@ -175,10 +190,8 @@ def prepare_race_df(source_df: pd.DataFrame) -> pd.DataFrame:
     df["distance_miles"] = df["race_type"].map(DISTANCE_MILES)
     df["finish_seconds"] = pd.NA
     completed_mask = df["status"] == "Completed"
-
     if completed_mask.any():
         df.loc[completed_mask, "finish_seconds"] = df.loc[completed_mask, "finish_time"].astype(str).apply(time_to_seconds)
-
     df["avg_mile_pace"] = df.apply(lambda row: seconds_to_pace(row["finish_seconds"], row["distance_miles"]), axis=1)
     df["race_date_display"] = df["race_date"].dt.strftime("%Y-%m-%d")
     df["race_year"] = df["race_date"].dt.year
@@ -188,8 +201,11 @@ def prepare_race_df(source_df: pd.DataFrame) -> pd.DataFrame:
 def prepare_map_df(race_df: pd.DataFrame) -> pd.DataFrame:
     states_df = pd.DataFrame(ALL_STATES, columns=["state", "state_name"])
     if race_df.empty:
-        for col in ["total_races", "completed_races", "registered_races", "interested_races", "unique_runners"]:
-            states_df[col] = 0
+        states_df["total_races"] = 0
+        states_df["completed_races"] = 0
+        states_df["registered_races"] = 0
+        states_df["interested_races"] = 0
+        states_df["unique_runners"] = 0
         states_df["map_status"] = "Empty"
         states_df["color_value"] = 0
         return states_df
@@ -233,81 +249,81 @@ def best_time_for_group(group: pd.DataFrame) -> str:
     return f"{row['runner_name']} - {row['finish_time']} ({row['race_type']})"
 
 
+def add_race_entry(entry: dict):
+    new_row = pd.DataFrame([entry])
+    st.session_state.source_data = normalize_source_df(pd.concat([st.session_state.source_data, new_row], ignore_index=True))
+
+
+def update_race_entry(index: int, entry: dict):
+    for col, value in entry.items():
+        st.session_state.source_data.at[index, col] = value
+    st.session_state.source_data = normalize_source_df(st.session_state.source_data)
+
+
+def delete_race_entry(index: int):
+    st.session_state.source_data = st.session_state.source_data.drop(index=index).reset_index(drop=True)
+
+
 def display_race_table(df: pd.DataFrame):
     if df.empty:
         st.info("No matching race entries.")
         return
-    display_df = df[["status", "state", "state_name", "runner_name", "race_type", "race_name", "city", "race_date_display", "finish_time", "avg_mile_pace", "notes"]].rename(
+    display_df = df[[
+        "status", "state", "state_name", "runner_name", "race_type", "race_name", "city",
+        "race_date_display", "finish_time", "avg_mile_pace", "notes"
+    ]].rename(
         columns={
-            "status": "Status", "state": "State", "state_name": "State Name", "runner_name": "Runner",
-            "race_type": "Race Type", "race_name": "Race Name", "city": "City", "race_date_display": "Date",
-            "finish_time": "Finish Time", "avg_mile_pace": "Avg Mile Pace", "notes": "Notes",
+            "status": "Status",
+            "state": "State",
+            "state_name": "State Name",
+            "runner_name": "Runner",
+            "race_type": "Race Type",
+            "race_name": "Race Name",
+            "city": "City",
+            "race_date_display": "Date",
+            "finish_time": "Finish Time",
+            "avg_mile_pace": "Avg Mile Pace",
+            "notes": "Notes",
         }
     )
     st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
-# -------------------------------------------------
-# RunSignup mock integration
-# -------------------------------------------------
-def guess_race_type_from_events(events_text: str) -> str:
-    text = str(events_text or "").lower()
-    if "half" in text or "13.1" in text:
+def detect_race_type_from_events(events) -> str:
+    """Try to classify a race as one of the existing RunTracker race types."""
+    event_text = " ".join(
+        str(event.get("event", event).get("name", ""))
+        for event in events or []
+    ).lower()
+
+    if "half" in event_text or "13.1" in event_text:
         return "Half Marathon"
-    if "10k" in text or "10 k" in text or "6.2" in text:
-        return "10K"
-    if "10 mile" in text or "10-mile" in text:
+    if "10 mile" in event_text or "10-mile" in event_text or "10miler" in event_text:
         return "10 Mile"
-    if "5k" in text or "5 k" in text or "3.1" in text:
+    if "10k" in event_text or "10 k" in event_text:
+        return "10K"
+    if "5k" in event_text or "5 k" in event_text:
         return "5K"
+
+    # For this prototype, default to Half Marathon because that is your primary planning use case.
     return "Half Marathon"
 
 
-def flatten_runsignup_race(item: dict, fallback_state: str) -> dict:
-    race = item.get("race", item)
-    address = race.get("address") or {}
+def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
+    """Pull 12 months of future RunSignUp races for one state and shape them like RunTracker rows."""
+    api_key = get_secret("RUNSIGNUP_API_KEY")
+    api_secret = get_secret("RUNSIGNUP_API_SECRET")
 
-    event_names = []
-    event_distances = []
-    for event_wrapper in race.get("events") or []:
-        event = event_wrapper.get("event", event_wrapper)
-        if event.get("name"):
-            event_names.append(str(event.get("name")))
-        distance = event.get("distance")
-        units = event.get("distance_units") or event.get("distance_unit")
-        if distance:
-            event_distances.append(f"{distance} {units or ''}".strip())
+    if not api_key or not api_secret:
+        raise RuntimeError(
+            "Missing RunSignUp credentials. Add RUNSIGNUP_API_KEY and RUNSIGNUP_API_SECRET to Streamlit secrets."
+        )
 
-    event_summary = "; ".join(event_names + event_distances)
-    state_code = str(address.get("state") or fallback_state).upper()
-    race_url = race.get("url") or race.get("external_race_url") or ""
-
-    return {
-        "state": state_code,
-        "state_name": STATE_NAME_LOOKUP.get(state_code, state_code),
-        "runner_name": "API Future Race",
-        "race_type": guess_race_type_from_events(event_summary),
-        "race_name": race.get("name", ""),
-        "race_date": race.get("next_date", ""),
-        "finish_time": "",
-        "city": address.get("city", ""),
-        "notes": race_url,
-        "status": "Interested",
-    }
-
-
-def fetch_runsignup_future_races_for_state(
-    state_code: str,
-    api_key: str,
-    api_secret: str,
-    max_pages: int = 5,
-    results_per_page: int = 1000,
-) -> pd.DataFrame:
-    rows = []
     start_date = date.today()
     end_date = start_date + timedelta(days=365)
+    rows = []
 
-    for page in range(1, max_pages + 1):
+    for page in range(1, 6):
         params = {
             "format": "json",
             "api_key": api_key,
@@ -317,35 +333,47 @@ def fetch_runsignup_future_races_for_state(
             "state": state_code,
             "events": "T",
             "page": page,
-            "results_per_page": results_per_page,
+            "results_per_page": 1000,
             "sort": "date ASC",
         }
 
         response = requests.get(RUNSIGNUP_API_URL, params=params, timeout=30)
         if response.status_code != 200:
-            raise RuntimeError(f"RunSignup returned HTTP {response.status_code}:\n\n{response.text[:2000]}")
+            raise RuntimeError(f"RunSignUp API error for {state_code}: {response.text[:2000]}")
 
         data = response.json()
-        page_races = data.get("races", [])
-        if not page_races:
+        races = data.get("races", [])
+        if not races:
             break
 
-        for item in page_races:
-            rows.append(flatten_runsignup_race(item, fallback_state=state_code))
+        for item in races:
+            race = item.get("race", item)
+            address = race.get("address") or {}
+            events = race.get("events") or []
+            race_url = race.get("url") or race.get("external_race_url") or ""
 
-        if len(page_races) < results_per_page:
+            rows.append({
+                "state": state_code,
+                "state_name": STATE_NAME_LOOKUP.get(state_code, state_code),
+                "runner_name": "API Future Race",
+                "race_type": detect_race_type_from_events(events),
+                "race_name": race.get("name", ""),
+                "race_date": race.get("next_date", ""),
+                "finish_time": "",
+                "city": address.get("city", ""),
+                "notes": race_url,
+                "status": "Interested",
+            })
+
+        if len(races) < 1000:
             break
 
-    return normalize_source_df(pd.DataFrame(rows))
-
-
-def fetch_runsignup_mock_states(api_key: str, api_secret: str) -> pd.DataFrame:
-    state_dfs = []
-    for state_code in RUNSIGNUP_TEST_STATES:
-        state_dfs.append(fetch_runsignup_future_races_for_state(state_code, api_key, api_secret))
-    if not state_dfs:
+    if not rows:
         return normalize_source_df(pd.DataFrame(columns=REQUIRED_COLUMNS))
-    return normalize_source_df(pd.concat(state_dfs, ignore_index=True))
+
+    df = normalize_source_df(pd.DataFrame(rows))
+    df = df.drop_duplicates(subset=["state", "race_name", "race_date", "city"], keep="first")
+    return df
 
 
 # -------------------------------------------------
@@ -360,53 +388,52 @@ if "runsignup_future_races" not in st.session_state:
     st.session_state.runsignup_future_races = normalize_source_df(pd.DataFrame(columns=REQUIRED_COLUMNS))
 
 # -------------------------------------------------
-# Header + API controls
+# Header + API prototype controls + filters
 # -------------------------------------------------
 st.title("50 States Race Tracker")
-st.caption("Track completed races, registered future races, interested future races, and test future race planning data from RunSignup.")
+st.caption("Track completed races, registered future races, and interested future races across the United States.")
 
 with st.sidebar:
     st.title("Filters")
 
-    st.markdown("### RunSignup Prototype")
-    api_key = st.text_input("RunSignup API Key", value=get_secret("RUNSIGNUP_API_KEY"), type="password")
-    api_secret = st.text_input("RunSignup API Secret", value=get_secret("RUNSIGNUP_API_SECRET"), type="password")
-
-    show_runsignup_future = st.toggle(
-        "Show CO + SD RunSignup future races",
+    st.markdown("### Future Race API Test")
+    show_api_future_races = st.toggle(
+        "Show RunSignUp future races for CO + SD",
         value=False,
-        help="Prototype only: pulls 12 months of future races for Colorado and South Dakota and treats them as Interested.",
+        help="Prototype toggle. Pulls 12 months of future RunSignUp races for Colorado and South Dakota and treats them as Interested rows.",
     )
 
-    if st.button("Pull CO + SD future races"):
-        if not api_key or not api_secret:
-            st.error("Add your RunSignup API key and secret first.")
-        else:
-            with st.spinner("Pulling Colorado and South Dakota races from RunSignup..."):
-                try:
-                    st.session_state.runsignup_future_races = fetch_runsignup_mock_states(api_key, api_secret)
-                    st.success(f"Pulled {len(st.session_state.runsignup_future_races):,} future race rows.")
-                except Exception as exc:
-                    st.error("RunSignup pull failed.")
-                    st.code(str(exc))
+    if st.button("Pull CO + SD Future Races"):
+        with st.spinner("Pulling future races from RunSignUp..."):
+            try:
+                co_df = fetch_runsignup_future_races_for_state("CO")
+                sd_df = fetch_runsignup_future_races_for_state("SD")
+                st.session_state.runsignup_future_races = normalize_source_df(
+                    pd.concat([co_df, sd_df], ignore_index=True)
+                )
+                st.success(f"Loaded {len(st.session_state.runsignup_future_races):,} future race rows.")
+            except Exception as exc:
+                st.error("RunSignUp pull failed.")
+                st.code(str(exc))
 
     if not st.session_state.runsignup_future_races.empty:
-        st.caption(f"Current API cache: {len(st.session_state.runsignup_future_races):,} rows")
-        if st.button("Clear RunSignup API cache"):
-            st.session_state.runsignup_future_races = normalize_source_df(pd.DataFrame(columns=REQUIRED_COLUMNS))
-            st.rerun()
+        st.caption(f"API rows in session: {len(st.session_state.runsignup_future_races):,}")
 
-# Combine normal source data with API mock data only when toggle is on.
-combined_source_df = st.session_state.source_data.copy()
-if show_runsignup_future and not st.session_state.runsignup_future_races.empty:
-    combined_source_df = normalize_source_df(
-        pd.concat([combined_source_df, st.session_state.runsignup_future_races], ignore_index=True)
+    if st.button("Clear API Future Races"):
+        st.session_state.runsignup_future_races = normalize_source_df(pd.DataFrame(columns=REQUIRED_COLUMNS))
+        st.rerun()
+
+# Merge local data with API future rows before preparing filters, map, metrics, and graphs.
+combined_source_data = st.session_state.source_data.copy()
+if show_api_future_races and not st.session_state.runsignup_future_races.empty:
+    combined_source_data = normalize_source_df(
+        pd.concat([combined_source_data, st.session_state.runsignup_future_races], ignore_index=True)
     )
 
-race_df = prepare_race_df(combined_source_df)
+race_df = prepare_race_df(combined_source_data)
 
 with st.sidebar:
-    st.divider()
+    st.markdown("---")
     runner_options = sorted(race_df["runner_name"].dropna().unique())
     race_type_options = sorted(race_df["race_type"].dropna().unique())
     runner_filter = st.multiselect("Runner", options=runner_options, default=runner_options)
@@ -418,6 +445,7 @@ filtered_race_df = race_df[
     & race_df["race_type"].isin(race_type_filter)
     & race_df["status"].isin(status_filter)
 ].copy()
+
 filtered_map_df = prepare_map_df(filtered_race_df)
 
 col1, col2, col3, col4 = st.columns(4)
@@ -426,7 +454,7 @@ col2.metric("States Registered", int((filtered_map_df["map_status"] == "Register
 col3.metric("States Interested", int((filtered_map_df["map_status"] == "Interested").sum()))
 col4.metric("Total Entries", len(filtered_race_df))
 
-map_page, graphs_page, manage_page = st.tabs(["Map", "Graphs", "Data Management"])
+map_page, graphs_page, manage_page = st.tabs(["️ Map", " Graphs", "️ Data Management"])
 
 # -------------------------------------------------
 # Page 1: Map
@@ -435,10 +463,12 @@ with map_page:
     st.subheader("US Map")
     st.caption("Status priority: Completed beats Registered, Registered beats Interested, and empty states stay blank.")
 
-    if show_runsignup_future:
-        st.info("RunSignup prototype data is included on the map as Interested rows for Colorado and South Dakota.")
+    if show_api_future_races:
+        st.info(
+            "RunSignUp future race overlay is ON. CO + SD API rows are included if you have clicked the sidebar pull button."
+        )
         if not st.session_state.runsignup_future_races.empty:
-            with st.expander("Preview pulled RunSignup future races"):
+            with st.expander("Preview RunSignUp API future rows"):
                 preview_df = prepare_race_df(st.session_state.runsignup_future_races)
                 display_race_table(preview_df.sort_values(["state", "race_date", "race_name"]))
 
@@ -462,7 +492,39 @@ with map_page:
         range_color=(0, 3),
     )
     fig.update_traces(marker_line_color="white", marker_line_width=1)
-    fig.update_geos(scope="usa", visible=False, projection_scale=1.1, center={"lat": 38.5, "lon": -96})
+
+    # -------------------------------------------------
+    # Main map mobile tuning
+    # -------------------------------------------------
+    # projection_scale:
+    # Higher = zooms the US map larger.
+    # Try 1.10 to 1.35. If Alaska/Hawaii or edges feel cramped, lower it.
+    #
+    # height:
+    # Higher = gives the map more vertical space, especially helpful on mobile.
+    # Try 560 to 700.
+    #
+    # coloraxis_colorbar:
+    # This is the map key/legend. It is horizontal below the map so it does
+    # not steal right-side width from the US map on mobile.
+    #
+    # y:
+    # Controls how far below the map the legend sits.
+    # Less negative, like -0.03, pulls it closer to the map.
+    #
+    # len:
+    # Controls legend width as a percent of the chart width.
+    # Smaller, like 0.60 to 0.70, takes less horizontal space.
+    #
+    # thickness:
+    # Controls the height/thickness of the legend bar.
+    # Smaller, like 7 to 9, is more compact on mobile.
+    fig.update_geos(
+        scope="usa",
+        visible=False,
+        projection_scale=1.1,
+        center={"lat": 38.5, "lon": -96},
+    )
     fig.update_layout(
         height=800,
         autosize=True,
@@ -481,6 +543,7 @@ with map_page:
     )
 
     selected = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points")
+    st.caption("The legend was moved below the map and made horizontal so the US map has more room on mobile.")
 
     selected_state = None
     if selected and selected.get("selection") and selected["selection"].get("points"):
@@ -490,8 +553,8 @@ with map_page:
     state_options = ["Select a state..."] + [name for _, name in ALL_STATES]
     state_name_to_code = {name: code for code, name in ALL_STATES}
     code_to_state_name = {code: name for code, name in ALL_STATES}
-
     default_index = 0
+
     if selected_state:
         default_state_name = code_to_state_name.get(selected_state)
         if default_state_name in state_options:
@@ -502,7 +565,9 @@ with map_page:
         selected_state = state_name_to_code[chosen_state_name]
 
     if selected_state:
-        state_runs = filtered_race_df[filtered_race_df["state"] == selected_state].sort_values(["race_date", "runner_name"], ascending=[False, True])
+        state_runs = filtered_race_df[filtered_race_df["state"] == selected_state].sort_values(
+            ["race_date", "runner_name"], ascending=[False, True]
+        )
         st.write(f"**{code_to_state_name[selected_state]}**")
         if state_runs.empty:
             st.info("No matching race data for this state under the current filters.")
@@ -555,7 +620,16 @@ with graphs_page:
             st.info("No upcoming registered or interested races found.")
         else:
             upcoming_display = upcoming_df[["status", "runner_name", "race_type", "race_name", "city", "state", "race_date_display", "notes"]].rename(
-                columns={"status": "Status", "runner_name": "Runner", "race_type": "Race Type", "race_name": "Race Name", "city": "City", "state": "State", "race_date_display": "Date", "notes": "Notes / URL"}
+                columns={
+                    "status": "Status",
+                    "runner_name": "Runner",
+                    "race_type": "Race Type",
+                    "race_name": "Race Name",
+                    "city": "City",
+                    "state": "State",
+                    "race_date_display": "Date",
+                    "notes": "Notes / URL",
+                }
             )
             st.dataframe(upcoming_display, use_container_width=True, hide_index=True)
 
@@ -563,23 +637,25 @@ with graphs_page:
         display_race_table(filtered_race_df.sort_values(["race_date", "runner_name"], ascending=[False, True]))
 
 # -------------------------------------------------
-# Page 3: Data management
+# Page 3: Data management, add, edit, delete
 # -------------------------------------------------
 with manage_page:
     st.subheader("Data Management")
-    st.markdown("Download a blank template, export current manual data, or upload a CSV to replace the current manual session data.")
+    st.markdown("Download a blank template, export current data, or upload a CSV to replace the current session data.")
 
     c1, c2 = st.columns(2)
     with c1:
-        st.download_button("Download Blank CSV Template", data=build_template_df().to_csv(index=False).encode("utf-8"), file_name="race_results_template.csv", mime="text/csv")
-    with c2:
-        st.download_button("Download Current Manual Data", data=st.session_state.source_data.to_csv(index=False).encode("utf-8"), file_name="race_results_current.csv", mime="text/csv")
-
-    if not st.session_state.runsignup_future_races.empty:
         st.download_button(
-            "Download Current RunSignup Prototype Data",
-            data=st.session_state.runsignup_future_races.to_csv(index=False).encode("utf-8"),
-            file_name="runsignup_future_races_mock.csv",
+            "Download Blank CSV Template",
+            data=build_template_df().to_csv(index=False).encode("utf-8"),
+            file_name="race_results_template.csv",
+            mime="text/csv",
+        )
+    with c2:
+        st.download_button(
+            "Download Current Data",
+            data=st.session_state.source_data.to_csv(index=False).encode("utf-8"),
+            file_name="race_results_current.csv",
             mime="text/csv",
         )
 
@@ -595,14 +671,136 @@ with manage_page:
                 st.write(f"- {err}")
         else:
             st.success("CSV looks valid.")
-            if st.button("Replace Current Manual Data With Uploaded CSV"):
+            if st.button("Replace Current Data With Uploaded CSV"):
                 st.session_state.source_data = normalize_source_df(uploaded_df)
-                st.success("Current manual session data replaced successfully.")
+                st.success("Current session data replaced successfully.")
                 st.rerun()
 
     st.divider()
-    st.info("For this prototype, RunSignup data is only stored in session_state. It is not saved permanently until we add SQLite or another database.")
+    st.subheader("Add One Race")
+    with st.form("add_race_form", clear_on_submit=True):
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            add_runner_name = st.text_input("Runner Name")
+            add_race_name = st.text_input("Race Name")
+            add_race_date = st.date_input("Race Date", value=date.today())
+        with a2:
+            add_state_name = st.selectbox("State", [name for _, name in ALL_STATES])
+            add_city = st.text_input("City")
+            add_race_type = st.selectbox("Race Type", VALID_RACE_TYPES)
+        with a3:
+            add_status = st.selectbox("Status", VALID_STATUSES)
+            add_finish_time = st.text_input("Finish Time", placeholder="Required only for completed races")
+            add_notes = st.text_area("Notes", height=100)
 
-st.caption("Next upgrade ideas: SQLite backend, Excel import, household/user accounts, medals/badges, public profiles, and monetized premium plans.")
+        if st.form_submit_button("Add Race"):
+            if not add_runner_name.strip() and add_status == "Completed":
+                st.error("Runner Name is required for completed races.")
+            elif not add_race_name.strip():
+                st.error("Race Name is required.")
+            elif add_status == "Completed" and not add_finish_time.strip():
+                st.error("Finish Time is required for completed races.")
+            else:
+                if add_status == "Completed":
+                    try:
+                        time_to_seconds(add_finish_time)
+                    except Exception:
+                        st.error("Finish Time must use MM:SS or H:MM:SS format.")
+                        st.stop()
+                state_code = STATE_CODE_LOOKUP[add_state_name]
+                add_race_entry({
+                    "state": state_code,
+                    "state_name": add_state_name,
+                    "runner_name": add_runner_name,
+                    "race_type": add_race_type,
+                    "race_name": add_race_name,
+                    "race_date": add_race_date.strftime("%Y-%m-%d"),
+                    "finish_time": add_finish_time,
+                    "city": add_city,
+                    "notes": add_notes,
+                    "status": add_status,
+                })
+                st.success("Race added.")
+                st.rerun()
 
+    st.divider()
+    st.subheader("Edit or Delete an Existing Race")
+    editable_df = st.session_state.source_data.copy().reset_index(drop=True)
+    if editable_df.empty:
+        st.info("No race entries to edit yet.")
+    else:
+        entry_labels = [
+            f"{idx}: {row['race_date']} | {row['state']} | {row['runner_name']} | {row['race_name']} | {row['status']}"
+            for idx, row in editable_df.iterrows()
+        ]
+        selected_label = st.selectbox("Select Entry", entry_labels)
+        selected_index = int(selected_label.split(":", 1)[0])
+        selected_row = editable_df.loc[selected_index]
+        parsed_date = pd.to_datetime(selected_row["race_date"], errors="coerce")
+        default_date = parsed_date.date() if not pd.isna(parsed_date) else date.today()
+        all_state_names = [name for _, name in ALL_STATES]
 
+        with st.form("edit_race_form"):
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                edit_runner_name = st.text_input("Runner Name", value=selected_row["runner_name"])
+                edit_race_name = st.text_input("Race Name", value=selected_row["race_name"])
+                edit_race_date = st.date_input("Race Date", value=default_date, key="edit_race_date")
+            with e2:
+                edit_state_name = st.selectbox(
+                    "State",
+                    all_state_names,
+                    index=all_state_names.index(selected_row["state_name"]) if selected_row["state_name"] in all_state_names else 0,
+                )
+                edit_city = st.text_input("City", value=selected_row["city"])
+                edit_race_type = st.selectbox(
+                    "Race Type",
+                    VALID_RACE_TYPES,
+                    index=VALID_RACE_TYPES.index(selected_row["race_type"]) if selected_row["race_type"] in VALID_RACE_TYPES else 0,
+                )
+            with e3:
+                edit_status = st.selectbox(
+                    "Status",
+                    VALID_STATUSES,
+                    index=VALID_STATUSES.index(selected_row["status"]) if selected_row["status"] in VALID_STATUSES else 0,
+                )
+                edit_finish_time = st.text_input("Finish Time", value=selected_row["finish_time"])
+                edit_notes = st.text_area("Notes", value=selected_row["notes"], height=100)
+
+            if st.form_submit_button("Save Changes"):
+                if not edit_runner_name.strip() and edit_status == "Completed":
+                    st.error("Runner Name is required for completed races.")
+                elif not edit_race_name.strip():
+                    st.error("Race Name is required.")
+                elif edit_status == "Completed" and not edit_finish_time.strip():
+                    st.error("Finish Time is required when converting a race to Completed.")
+                else:
+                    if edit_status == "Completed":
+                        try:
+                            time_to_seconds(edit_finish_time)
+                        except Exception:
+                            st.error("Finish Time must use MM:SS or H:MM:SS format.")
+                            st.stop()
+                    state_code = STATE_CODE_LOOKUP[edit_state_name]
+                    update_race_entry(selected_index, {
+                        "state": state_code,
+                        "state_name": edit_state_name,
+                        "runner_name": edit_runner_name,
+                        "race_type": edit_race_type,
+                        "race_name": edit_race_name,
+                        "race_date": edit_race_date.strftime("%Y-%m-%d"),
+                        "finish_time": edit_finish_time,
+                        "city": edit_city,
+                        "notes": edit_notes,
+                        "status": edit_status,
+                    })
+                    st.success("Race updated.")
+                    st.rerun()
+
+        if st.button("Delete Selected Entry", type="secondary"):
+            delete_race_entry(selected_index)
+            st.success("Race deleted.")
+            st.rerun()
+
+    st.markdown("---")
+    st.caption("Next upgrade ideas: SQLite backend, scheduled RunSignUp refresh, Excel import, household/user accounts, medals/badges, public profiles, and monetized premium plans.")
