@@ -10,7 +10,12 @@ st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 # -------------------------------------------------
 # RunSignUp API settings
 # -------------------------------------------------
+# This is the same endpoint that worked in the standalone RaceGetRunsignup app.
+RUNSIGNUP_API_URL = "https://api.runsignup.com/rest/races"
+API_URL = RUNSIGNUP_API_URL  # optional alias, kept for consistency with the prototype
 
+# Hard-coded for now per your testing preference.
+# Best practice later: move these to .streamlit/secrets.toml before making the repo public.
 RUNSIGNUP_API_KEY = "b5joqX8Ur02116FakymNv5N8wlsCoNhO"
 RUNSIGNUP_API_SECRET = "rllMlmau5DQjlfFcVF0HUJ0ILzfi27gp"
 
@@ -29,29 +34,29 @@ def get_secret(name: str, default: str = "") -> str:
 # Sample preloaded data
 # -------------------------------------------------
 SAMPLE_DATA = [
-    {"state":"NE","state_name":"Nebraska","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Lincoln Half Marathon","race_date":"2024-05-04","finish_time":"2:06:45","city":"Lincoln","notes":"","status":"Completed"},
-    {"state":"TX","state_name":"Texas","runner_name":"Rachel","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2024-12-15","finish_time":"2:05:35","city":"Dallas","notes":"","status":"Completed"},
-    {"state":"NV","state_name":"Nevada","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:22:16","city":"Las Vegas","notes":"","status":"Completed"},
-    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"Half Marathon","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"2:41:00","city":"Omaha","notes":"","status":"Completed"},
-    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"Half Marathon","race_name":"Lincoln Half Marathon","race_date":"2024-05-04","finish_time":"1:55:36","city":"Lincoln","notes":"","status":"Completed"},
-    {"state":"TX","state_name":"Texas","runner_name":"Tom","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2024-12-15","finish_time":"1:54:34","city":"Dallas","notes":"","status":"Completed"},
-    {"state":"NV","state_name":"Nevada","runner_name":"Tom","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:24:04","city":"Las Vegas","notes":"","status":"Completed"},
-    {"state":"NE","state_name":"Nebraska","runner_name":"Rachel","race_type":"10 Mile","race_name":"Early Bird Run","race_date":"2026-04-04","finish_time":"1:32:42","city":"Omaha","notes":"","status":"Completed"},
-    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"10 Mile","race_name":"Early Bird Run","race_date":"2024-04-06","finish_time":"1:31:21","city":"Omaha","notes":"","status":"Completed"},
-    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"10 Mile","race_name":"Early Bird Run","race_date":"2026-04-04","finish_time":"1:28:07","city":"Omaha","notes":"","status":"Completed"},
-    {"state":"NE","state_name":"Nebraska","runner_name":"Rachel","race_type":"5K","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"0:30:33","city":"Omaha","notes":"","status":"Completed"},
-    {"state":"NE","state_name":"Nebraska","runner_name":"Tom","race_type":"5K","race_name":"Gator Fun Run","race_date":"2026-04-25","finish_time":"0:24:30","city":"Omaha","notes":"","status":"Completed"},
-    {"state":"IN","state_name":"Indiana","runner_name":"Tom","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2026-05-02","finish_time":"1:53:20","city":"Indianapolis","notes":"","status":"Completed"},
-    {"state":"IN","state_name":"Indiana","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2026-05-02","finish_time":"2:01:40","city":"Indianapolis","notes":"","status":"Completed"},
-    {"state":"IN","state_name":"Indiana","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2026-05-02","finish_time":"2:20:50","city":"Indianapolis","notes":"","status":"Completed"},
-    {"state":"IN","state_name":"Indiana","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Indi Mini","race_date":"2019-05-04","finish_time":"2:41:43","city":"Indianapolis","notes":"","status":"Completed"},
-    {"state":"TX","state_name":"Texas","runner_name":"Olivia","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2025-12-14","finish_time":"2:27:28","city":"Dallas","notes":"","status":"Completed"},
-    {"state":"TX","state_name":"Texas","runner_name":"Olivia","race_type":"Half Marathon","race_name":"BMW Dallas Half Marathon","race_date":"2024-12-15","finish_time":"2:18:01","city":"Dallas","notes":"","status":"Completed"},
-    {"state":"NE","state_name":"Nebraska","runner_name":"Olivia","race_type":"Half Marathon","race_name":"OmaHalf","race_date":"2022-04-16","finish_time":"2:26:17","city":"Omaha","notes":"","status":"Completed"},
-    {"state":"NV","state_name":"Nevada","runner_name":"Olivia","race_type":"Half Marathon","race_name":"Rock 'n' Roll Las Vegas Half Marathon","race_date":"2025-02-23","finish_time":"2:20:47","city":"Las Vegas","notes":"","status":"Completed"},
-    {"state":"CO","state_name":"Colorado","runner_name":"","race_type":"Half Marathon","race_name":"All-Out Runapalooza","race_date":"2026-08-08","finish_time":"","city":"Denver","notes":"","status":"Interested"},
-    {"state":"MO","state_name":"Missouri","runner_name":"Tom","race_type":"Half Marathon","race_name":"Hospital Hill Run","race_date":"2026-05-16","finish_time":"1:56:24","city":"Kansas City","notes":"","status":"Completed"},
-    {"state":"MO","state_name":"Missouri","runner_name":"Rachel","race_type":"Half Marathon","race_name":"Hospital Hill Run","race_date":"2026-05-16","finish_time":"2:09:57","city":"Kansas City","notes":"","status":"Completed"},
+    {"state": "NE", "state_name": "Nebraska", "runner_name": "Rachel", "race_type": "Half Marathon", "race_name": "Lincoln Half Marathon", "race_date": "2024-05-04", "finish_time": "2:06:45", "city": "Lincoln", "notes": "", "status": "Completed"},
+    {"state": "TX", "state_name": "Texas", "runner_name": "Rachel", "race_type": "Half Marathon", "race_name": "BMW Dallas Half Marathon", "race_date": "2024-12-15", "finish_time": "2:05:35", "city": "Dallas", "notes": "", "status": "Completed"},
+    {"state": "NV", "state_name": "Nevada", "runner_name": "Rachel", "race_type": "Half Marathon", "race_name": "Rock 'n' Roll Las Vegas Half Marathon", "race_date": "2025-02-23", "finish_time": "2:22:16", "city": "Las Vegas", "notes": "", "status": "Completed"},
+    {"state": "NE", "state_name": "Nebraska", "runner_name": "Tom", "race_type": "Half Marathon", "race_name": "OmaHalf", "race_date": "2022-04-16", "finish_time": "2:41:00", "city": "Omaha", "notes": "", "status": "Completed"},
+    {"state": "NE", "state_name": "Nebraska", "runner_name": "Tom", "race_type": "Half Marathon", "race_name": "Lincoln Half Marathon", "race_date": "2024-05-04", "finish_time": "1:55:36", "city": "Lincoln", "notes": "", "status": "Completed"},
+    {"state": "TX", "state_name": "Texas", "runner_name": "Tom", "race_type": "Half Marathon", "race_name": "BMW Dallas Half Marathon", "race_date": "2024-12-15", "finish_time": "1:54:34", "city": "Dallas", "notes": "", "status": "Completed"},
+    {"state": "NV", "state_name": "Nevada", "runner_name": "Tom", "race_type": "Half Marathon", "race_name": "Rock 'n' Roll Las Vegas Half Marathon", "race_date": "2025-02-23", "finish_time": "2:24:04", "city": "Las Vegas", "notes": "", "status": "Completed"},
+    {"state": "NE", "state_name": "Nebraska", "runner_name": "Rachel", "race_type": "10 Mile", "race_name": "Early Bird Run", "race_date": "2026-04-04", "finish_time": "1:32:42", "city": "Omaha", "notes": "", "status": "Completed"},
+    {"state": "NE", "state_name": "Nebraska", "runner_name": "Tom", "race_type": "10 Mile", "race_name": "Early Bird Run", "race_date": "2024-04-06", "finish_time": "1:31:21", "city": "Omaha", "notes": "", "status": "Completed"},
+    {"state": "NE", "state_name": "Nebraska", "runner_name": "Tom", "race_type": "10 Mile", "race_name": "Early Bird Run", "race_date": "2026-04-04", "finish_time": "1:28:07", "city": "Omaha", "notes": "", "status": "Completed"},
+    {"state": "NE", "state_name": "Nebraska", "runner_name": "Rachel", "race_type": "5K", "race_name": "OmaHalf", "race_date": "2022-04-16", "finish_time": "0:30:33", "city": "Omaha", "notes": "", "status": "Completed"},
+    {"state": "NE", "state_name": "Nebraska", "runner_name": "Tom", "race_type": "5K", "race_name": "Gator Fun Run", "race_date": "2026-04-25", "finish_time": "0:24:30", "city": "Omaha", "notes": "", "status": "Completed"},
+    {"state": "IN", "state_name": "Indiana", "runner_name": "Tom", "race_type": "Half Marathon", "race_name": "Indi Mini", "race_date": "2026-05-02", "finish_time": "1:53:20", "city": "Indianapolis", "notes": "", "status": "Completed"},
+    {"state": "IN", "state_name": "Indiana", "runner_name": "Rachel", "race_type": "Half Marathon", "race_name": "Indi Mini", "race_date": "2026-05-02", "finish_time": "2:01:40", "city": "Indianapolis", "notes": "", "status": "Completed"},
+    {"state": "IN", "state_name": "Indiana", "runner_name": "Olivia", "race_type": "Half Marathon", "race_name": "Indi Mini", "race_date": "2026-05-02", "finish_time": "2:20:50", "city": "Indianapolis", "notes": "", "status": "Completed"},
+    {"state": "IN", "state_name": "Indiana", "runner_name": "Olivia", "race_type": "Half Marathon", "race_name": "Indi Mini", "race_date": "2019-05-04", "finish_time": "2:41:43", "city": "Indianapolis", "notes": "", "status": "Completed"},
+    {"state": "TX", "state_name": "Texas", "runner_name": "Olivia", "race_type": "Half Marathon", "race_name": "BMW Dallas Half Marathon", "race_date": "2025-12-14", "finish_time": "2:27:28", "city": "Dallas", "notes": "", "status": "Completed"},
+    {"state": "TX", "state_name": "Texas", "runner_name": "Olivia", "race_type": "Half Marathon", "race_name": "BMW Dallas Half Marathon", "race_date": "2024-12-15", "finish_time": "2:18:01", "city": "Dallas", "notes": "", "status": "Completed"},
+    {"state": "NE", "state_name": "Nebraska", "runner_name": "Olivia", "race_type": "Half Marathon", "race_name": "OmaHalf", "race_date": "2022-04-16", "finish_time": "2:26:17", "city": "Omaha", "notes": "", "status": "Completed"},
+    {"state": "NV", "state_name": "Nevada", "runner_name": "Olivia", "race_type": "Half Marathon", "race_name": "Rock 'n' Roll Las Vegas Half Marathon", "race_date": "2025-02-23", "finish_time": "2:20:47", "city": "Las Vegas", "notes": "", "status": "Completed"},
+    {"state": "CO", "state_name": "Colorado", "runner_name": "", "race_type": "Half Marathon", "race_name": "All-Out Runapalooza", "race_date": "2026-08-08", "finish_time": "", "city": "Denver", "notes": "", "status": "Interested"},
+    {"state": "MO", "state_name": "Missouri", "runner_name": "Tom", "race_type": "Half Marathon", "race_name": "Hospital Hill Run", "race_date": "2026-05-16", "finish_time": "1:56:24", "city": "Kansas City", "notes": "", "status": "Completed"},
+    {"state": "MO", "state_name": "Missouri", "runner_name": "Rachel", "race_type": "Half Marathon", "race_name": "Hospital Hill Run", "race_date": "2026-05-16", "finish_time": "2:09:57", "city": "Kansas City", "notes": "", "status": "Completed"},
 ]
 
 DISTANCE_MILES = {
@@ -62,25 +67,19 @@ DISTANCE_MILES = {
 }
 
 ALL_STATES = [
-    ("AL", "Alabama"), ("AK", "Alaska"), ("AZ", "Arizona"), ("AR", "Arkansas"),
-    ("CA", "California"), ("CO", "Colorado"), ("CT", "Connecticut"), ("DE", "Delaware"),
-    ("FL", "Florida"), ("GA", "Georgia"), ("HI", "Hawaii"), ("ID", "Idaho"),
-    ("IL", "Illinois"), ("IN", "Indiana"), ("IA", "Iowa"), ("KS", "Kansas"),
-    ("KY", "Kentucky"), ("LA", "Louisiana"), ("ME", "Maine"), ("MD", "Maryland"),
-    ("MA", "Massachusetts"), ("MI", "Michigan"), ("MN", "Minnesota"), ("MS", "Mississippi"),
-    ("MO", "Missouri"), ("MT", "Montana"), ("NE", "Nebraska"), ("NV", "Nevada"),
-    ("NH", "New Hampshire"), ("NJ", "New Jersey"), ("NM", "New Mexico"), ("NY", "New York"),
-    ("NC", "North Carolina"), ("ND", "North Dakota"), ("OH", "Ohio"), ("OK", "Oklahoma"),
-    ("OR", "Oregon"), ("PA", "Pennsylvania"), ("RI", "Rhode Island"), ("SC", "South Carolina"),
-    ("SD", "South Dakota"), ("TN", "Tennessee"), ("TX", "Texas"), ("UT", "Utah"),
-    ("VT", "Vermont"), ("VA", "Virginia"), ("WA", "Washington"), ("WV", "West Virginia"),
-    ("WI", "Wisconsin"), ("WY", "Wyoming"),
+    ("AL", "Alabama"), ("AK", "Alaska"), ("AZ", "Arizona"), ("AR", "Arkansas"), ("CA", "California"),
+    ("CO", "Colorado"), ("CT", "Connecticut"), ("DE", "Delaware"), ("FL", "Florida"), ("GA", "Georgia"),
+    ("HI", "Hawaii"), ("ID", "Idaho"), ("IL", "Illinois"), ("IN", "Indiana"), ("IA", "Iowa"),
+    ("KS", "Kansas"), ("KY", "Kentucky"), ("LA", "Louisiana"), ("ME", "Maine"), ("MD", "Maryland"),
+    ("MA", "Massachusetts"), ("MI", "Michigan"), ("MN", "Minnesota"), ("MS", "Mississippi"), ("MO", "Missouri"),
+    ("MT", "Montana"), ("NE", "Nebraska"), ("NV", "Nevada"), ("NH", "New Hampshire"), ("NJ", "New Jersey"),
+    ("NM", "New Mexico"), ("NY", "New York"), ("NC", "North Carolina"), ("ND", "North Dakota"), ("OH", "Ohio"),
+    ("OK", "Oklahoma"), ("OR", "Oregon"), ("PA", "Pennsylvania"), ("RI", "Rhode Island"), ("SC", "South Carolina"),
+    ("SD", "South Dakota"), ("TN", "Tennessee"), ("TX", "Texas"), ("UT", "Utah"), ("VT", "Vermont"),
+    ("VA", "Virginia"), ("WA", "Washington"), ("WV", "West Virginia"), ("WI", "Wisconsin"), ("WY", "Wyoming"),
 ]
 
-REQUIRED_COLUMNS = [
-    "state", "state_name", "runner_name", "race_type", "race_name",
-    "race_date", "finish_time", "city", "notes", "status"
-]
+REQUIRED_COLUMNS = ["state", "state_name", "runner_name", "race_type", "race_name", "race_date", "finish_time", "city", "notes", "status"]
 VALID_RACE_TYPES = ["5K", "10K", "10 Mile", "Half Marathon"]
 VALID_STATUSES = ["Completed", "Registered", "Interested"]
 VALID_STATE_CODES = {code for code, _ in ALL_STATES}
@@ -88,6 +87,7 @@ STATE_NAME_LOOKUP = {code: name for code, name in ALL_STATES}
 STATE_CODE_LOOKUP = {name: code for code, name in ALL_STATES}
 STATUS_COLOR_VALUE = {"Empty": 0, "Interested": 1, "Registered": 2, "Completed": 3}
 STATUS_COLOR_SCALE = [[0.00, "#f1f5f9"], [0.33, "#d9ead3"], [0.66, "#fce5cd"], [1.00, "#6fa8dc"]]
+
 
 # -------------------------------------------------
 # Helpers
@@ -187,9 +187,11 @@ def prepare_race_df(source_df: pd.DataFrame) -> pd.DataFrame:
     df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
     df["distance_miles"] = df["race_type"].map(DISTANCE_MILES)
     df["finish_seconds"] = pd.NA
+
     completed_mask = df["status"] == "Completed"
     if completed_mask.any():
         df.loc[completed_mask, "finish_seconds"] = df.loc[completed_mask, "finish_time"].astype(str).apply(time_to_seconds)
+
     df["avg_mile_pace"] = df.apply(lambda row: seconds_to_pace(row["finish_seconds"], row["distance_miles"]), axis=1)
     df["race_date_display"] = df["race_date"].dt.strftime("%Y-%m-%d")
     df["race_year"] = df["race_date"].dt.year
@@ -266,10 +268,10 @@ def display_race_table(df: pd.DataFrame):
     if df.empty:
         st.info("No matching race entries.")
         return
-    display_df = df[[
-        "status", "state", "state_name", "runner_name", "race_type", "race_name", "city",
-        "race_date_display", "finish_time", "avg_mile_pace", "notes"
-    ]].rename(
+
+    display_df = df[
+        ["status", "state", "state_name", "runner_name", "race_type", "race_name", "city", "race_date_display", "finish_time", "avg_mile_pace", "notes"]
+    ].rename(
         columns={
             "status": "Status",
             "state": "State",
@@ -303,19 +305,16 @@ def detect_race_type_from_events(events) -> str:
     if "5k" in event_text or "5 k" in event_text:
         return "5K"
 
-    # For this prototype, default to Half Marathon because that is your primary planning use case.
     return "Half Marathon"
 
 
 def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
     """Pull 12 months of future RunSignUp races for one state and shape them like RunTracker rows."""
-    api_key = RUNSIGNUP_API_KEY
-    api_secret = RUNSIGNUP_API_SECRET
+    api_key = RUNSIGNUP_API_KEY or get_secret("RUNSIGNUP_API_KEY")
+    api_secret = RUNSIGNUP_API_SECRET or get_secret("RUNSIGNUP_API_SECRET")
 
     if not api_key or not api_secret:
-        raise RuntimeError(
-            "Missing RunSignUp credentials. Add RUNSIGNUP_API_KEY and RUNSIGNUP_API_SECRET to Streamlit secrets."
-        )
+        raise RuntimeError("Missing RunSignUp credentials. Add RUNSIGNUP_API_KEY and RUNSIGNUP_API_SECRET to Streamlit secrets.")
 
     start_date = date.today()
     end_date = start_date + timedelta(days=365)
@@ -335,7 +334,9 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
             "sort": "date ASC",
         }
 
+        # FIX: this constant is now defined at the top of the file.
         response = requests.get(RUNSIGNUP_API_URL, params=params, timeout=30)
+
         if response.status_code != 200:
             raise RuntimeError(f"RunSignUp API error for {state_code}: {response.text[:2000]}")
 
@@ -350,18 +351,20 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
             events = race.get("events") or []
             race_url = race.get("url") or race.get("external_race_url") or ""
 
-            rows.append({
-                "state": state_code,
-                "state_name": STATE_NAME_LOOKUP.get(state_code, state_code),
-                "runner_name": "API Future Race",
-                "race_type": detect_race_type_from_events(events),
-                "race_name": race.get("name", ""),
-                "race_date": race.get("next_date", ""),
-                "finish_time": "",
-                "city": address.get("city", ""),
-                "notes": race_url,
-                "status": "Interested",
-            })
+            rows.append(
+                {
+                    "state": state_code,
+                    "state_name": STATE_NAME_LOOKUP.get(state_code, state_code),
+                    "runner_name": "API Future Race",
+                    "race_type": detect_race_type_from_events(events),
+                    "race_name": race.get("name", ""),
+                    "race_date": race.get("next_date", ""),
+                    "finish_time": "",
+                    "city": address.get("city", ""),
+                    "notes": race_url,
+                    "status": "Interested",
+                }
+            )
 
         if len(races) < 1000:
             break
@@ -385,6 +388,7 @@ else:
 if "runsignup_future_races" not in st.session_state:
     st.session_state.runsignup_future_races = normalize_source_df(pd.DataFrame(columns=REQUIRED_COLUMNS))
 
+
 # -------------------------------------------------
 # Header + API prototype controls + filters
 # -------------------------------------------------
@@ -393,8 +397,8 @@ st.caption("Track completed races, registered future races, and interested futur
 
 with st.sidebar:
     st.title("Filters")
-
     st.markdown("### Future Race API Test")
+
     show_api_future_races = st.toggle(
         "Show RunSignUp future races for CO + SD",
         value=False,
@@ -406,9 +410,7 @@ with st.sidebar:
             try:
                 co_df = fetch_runsignup_future_races_for_state("CO")
                 sd_df = fetch_runsignup_future_races_for_state("SD")
-                st.session_state.runsignup_future_races = normalize_source_df(
-                    pd.concat([co_df, sd_df], ignore_index=True)
-                )
+                st.session_state.runsignup_future_races = normalize_source_df(pd.concat([co_df, sd_df], ignore_index=True))
                 st.success(f"Loaded {len(st.session_state.runsignup_future_races):,} future race rows.")
             except Exception as exc:
                 st.error("RunSignUp pull failed.")
@@ -424,9 +426,7 @@ with st.sidebar:
 # Merge local data with API future rows before preparing filters, map, metrics, and graphs.
 combined_source_data = st.session_state.source_data.copy()
 if show_api_future_races and not st.session_state.runsignup_future_races.empty:
-    combined_source_data = normalize_source_df(
-        pd.concat([combined_source_data, st.session_state.runsignup_future_races], ignore_index=True)
-    )
+    combined_source_data = normalize_source_df(pd.concat([combined_source_data, st.session_state.runsignup_future_races], ignore_index=True))
 
 race_df = prepare_race_df(combined_source_data)
 
@@ -434,6 +434,7 @@ with st.sidebar:
     st.markdown("---")
     runner_options = sorted(race_df["runner_name"].dropna().unique())
     race_type_options = sorted(race_df["race_type"].dropna().unique())
+
     runner_filter = st.multiselect("Runner", options=runner_options, default=runner_options)
     race_type_filter = st.multiselect("Race Type", options=race_type_options, default=race_type_options)
     status_filter = st.multiselect("Status", options=VALID_STATUSES, default=VALID_STATUSES)
@@ -452,7 +453,8 @@ col2.metric("States Registered", int((filtered_map_df["map_status"] == "Register
 col3.metric("States Interested", int((filtered_map_df["map_status"] == "Interested").sum()))
 col4.metric("Total Entries", len(filtered_race_df))
 
-map_page, graphs_page, manage_page = st.tabs(["️ Map", " Graphs", "️ Data Management"])
+map_page, graphs_page, manage_page = st.tabs(["🗺️ Map", "📊 Graphs", "🛠️ Data Management"])
+
 
 # -------------------------------------------------
 # Page 1: Map
@@ -462,13 +464,12 @@ with map_page:
     st.caption("Status priority: Completed beats Registered, Registered beats Interested, and empty states stay blank.")
 
     if show_api_future_races:
-        st.info(
-            "RunSignUp future race overlay is ON. CO + SD API rows are included if you have clicked the sidebar pull button."
-        )
-        if not st.session_state.runsignup_future_races.empty:
-            with st.expander("Preview RunSignUp API future rows"):
-                preview_df = prepare_race_df(st.session_state.runsignup_future_races)
-                display_race_table(preview_df.sort_values(["state", "race_date", "race_name"]))
+        st.info("RunSignUp future race overlay is ON. CO + SD API rows are included if you have clicked the sidebar pull button.")
+
+    if not st.session_state.runsignup_future_races.empty:
+        with st.expander("Preview RunSignUp API future rows"):
+            preview_df = prepare_race_df(st.session_state.runsignup_future_races)
+            display_race_table(preview_df.sort_values(["state", "race_date", "race_name"]))
 
     fig = px.choropleth(
         filtered_map_df,
@@ -489,6 +490,7 @@ with map_page:
         color_continuous_scale=STATUS_COLOR_SCALE,
         range_color=(0, 3),
     )
+
     fig.update_traces(marker_line_color="white", marker_line_width=1)
 
     # -------------------------------------------------
@@ -551,8 +553,8 @@ with map_page:
     state_options = ["Select a state..."] + [name for _, name in ALL_STATES]
     state_name_to_code = {name: code for code, name in ALL_STATES}
     code_to_state_name = {code: name for code, name in ALL_STATES}
-    default_index = 0
 
+    default_index = 0
     if selected_state:
         default_state_name = code_to_state_name.get(selected_state)
         if default_state_name in state_options:
@@ -563,9 +565,7 @@ with map_page:
         selected_state = state_name_to_code[chosen_state_name]
 
     if selected_state:
-        state_runs = filtered_race_df[filtered_race_df["state"] == selected_state].sort_values(
-            ["race_date", "runner_name"], ascending=[False, True]
-        )
+        state_runs = filtered_race_df[filtered_race_df["state"] == selected_state].sort_values(["race_date", "runner_name"], ascending=[False, True])
         st.write(f"**{code_to_state_name[selected_state]}**")
         if state_runs.empty:
             st.info("No matching race data for this state under the current filters.")
@@ -579,11 +579,13 @@ with map_page:
     else:
         st.info("Click a state on the map or choose one from the dropdown to view race details.")
 
+
 # -------------------------------------------------
 # Page 2: Non-map graphs
 # -------------------------------------------------
 with graphs_page:
     st.subheader("Race Charts")
+
     if filtered_race_df.empty:
         st.info("No data available for the selected filters.")
     else:
@@ -617,7 +619,9 @@ with graphs_page:
         if upcoming_df.empty:
             st.info("No upcoming registered or interested races found.")
         else:
-            upcoming_display = upcoming_df[["status", "runner_name", "race_type", "race_name", "city", "state", "race_date_display", "notes"]].rename(
+            upcoming_display = upcoming_df[
+                ["status", "runner_name", "race_type", "race_name", "city", "state", "race_date_display", "notes"]
+            ].rename(
                 columns={
                     "status": "Status",
                     "runner_name": "Runner",
@@ -633,6 +637,7 @@ with graphs_page:
 
         st.markdown("#### All Race Entries")
         display_race_table(filtered_race_df.sort_values(["race_date", "runner_name"], ascending=[False, True]))
+
 
 # -------------------------------------------------
 # Page 3: Data management, add, edit, delete
@@ -705,25 +710,29 @@ with manage_page:
                     except Exception:
                         st.error("Finish Time must use MM:SS or H:MM:SS format.")
                         st.stop()
+
                 state_code = STATE_CODE_LOOKUP[add_state_name]
-                add_race_entry({
-                    "state": state_code,
-                    "state_name": add_state_name,
-                    "runner_name": add_runner_name,
-                    "race_type": add_race_type,
-                    "race_name": add_race_name,
-                    "race_date": add_race_date.strftime("%Y-%m-%d"),
-                    "finish_time": add_finish_time,
-                    "city": add_city,
-                    "notes": add_notes,
-                    "status": add_status,
-                })
+                add_race_entry(
+                    {
+                        "state": state_code,
+                        "state_name": add_state_name,
+                        "runner_name": add_runner_name,
+                        "race_type": add_race_type,
+                        "race_name": add_race_name,
+                        "race_date": add_race_date.strftime("%Y-%m-%d"),
+                        "finish_time": add_finish_time,
+                        "city": add_city,
+                        "notes": add_notes,
+                        "status": add_status,
+                    }
+                )
                 st.success("Race added.")
                 st.rerun()
 
     st.divider()
     st.subheader("Edit or Delete an Existing Race")
     editable_df = st.session_state.source_data.copy().reset_index(drop=True)
+
     if editable_df.empty:
         st.info("No race entries to edit yet.")
     else:
@@ -734,6 +743,7 @@ with manage_page:
         selected_label = st.selectbox("Select Entry", entry_labels)
         selected_index = int(selected_label.split(":", 1)[0])
         selected_row = editable_df.loc[selected_index]
+
         parsed_date = pd.to_datetime(selected_row["race_date"], errors="coerce")
         default_date = parsed_date.date() if not pd.isna(parsed_date) else date.today()
         all_state_names = [name for _, name in ALL_STATES]
@@ -779,19 +789,23 @@ with manage_page:
                         except Exception:
                             st.error("Finish Time must use MM:SS or H:MM:SS format.")
                             st.stop()
+
                     state_code = STATE_CODE_LOOKUP[edit_state_name]
-                    update_race_entry(selected_index, {
-                        "state": state_code,
-                        "state_name": edit_state_name,
-                        "runner_name": edit_runner_name,
-                        "race_type": edit_race_type,
-                        "race_name": edit_race_name,
-                        "race_date": edit_race_date.strftime("%Y-%m-%d"),
-                        "finish_time": edit_finish_time,
-                        "city": edit_city,
-                        "notes": edit_notes,
-                        "status": edit_status,
-                    })
+                    update_race_entry(
+                        selected_index,
+                        {
+                            "state": state_code,
+                            "state_name": edit_state_name,
+                            "runner_name": edit_runner_name,
+                            "race_type": edit_race_type,
+                            "race_name": edit_race_name,
+                            "race_date": edit_race_date.strftime("%Y-%m-%d"),
+                            "finish_time": edit_finish_time,
+                            "city": edit_city,
+                            "notes": edit_notes,
+                            "status": edit_status,
+                        },
+                    )
                     st.success("Race updated.")
                     st.rerun()
 
