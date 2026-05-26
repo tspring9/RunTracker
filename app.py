@@ -10,11 +10,9 @@ st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 # -------------------------------------------------
 # RunSignUp API settings
 # -------------------------------------------------
-# Recommended: add these to Streamlit secrets instead of hard-coding them.
-# .streamlit/secrets.toml
-# RUNSIGNUP_API_KEY="your_key_here"
-# RUNSIGNUP_API_SECRET="your_secret_here"
-RUNSIGNUP_API_URL = "https://api.runsignup.com/rest/races"
+
+RUNSIGNUP_API_KEY = "b5joqX8Ur02116FakymNv5N8wlsCoNhO"
+RUNSIGNUP_API_SECRET = "rllMlmau5DQjlfFcVF0HUJ0ILzfi27gp"
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -311,8 +309,8 @@ def detect_race_type_from_events(events) -> str:
 
 def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
     """Pull 12 months of future RunSignUp races for one state and shape them like RunTracker rows."""
-    api_key = get_secret("RUNSIGNUP_API_KEY")
-    api_secret = get_secret("RUNSIGNUP_API_SECRET")
+    api_key = RUNSIGNUP_API_KEY
+    api_secret = RUNSIGNUP_API_SECRET
 
     if not api_key or not api_secret:
         raise RuntimeError(
