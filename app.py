@@ -81,12 +81,14 @@ ALL_STATES = [
 
 REQUIRED_COLUMNS = ["state", "state_name", "runner_name", "race_type", "race_name", "race_date", "finish_time", "city", "notes", "status"]
 VALID_RACE_TYPES = ["5K", "10K", "10 Mile", "Half Marathon"]
-VALID_STATUSES = ["Completed", "Registered", "Interested"]
+VALID_STATUSES = ["Completed", "Registered", "Interested", "Available for Signup", "Blank"]
+USER_ENTRY_STATUSES = ["Completed", "Registered", "Interested", "Blank"]
+COPY_TARGET_STATUSES = ["Blank", "Interested", "Registered"]
 VALID_STATE_CODES = {code for code, _ in ALL_STATES}
 STATE_NAME_LOOKUP = {code: name for code, name in ALL_STATES}
 STATE_CODE_LOOKUP = {name: code for code, name in ALL_STATES}
-STATUS_COLOR_VALUE = {"Empty": 0, "Interested": 1, "Registered": 2, "Completed": 3}
-STATUS_COLOR_SCALE = [[0.00, "#f1f5f9"], [0.33, "#d9ead3"], [0.66, "#fce5cd"], [1.00, "#6fa8dc"]]
+STATUS_COLOR_VALUE = {"Empty": 0, "Available for Signup": 1, "Interested": 2, "Registered": 3, "Completed": 4}
+STATUS_COLOR_SCALE = [[0.00, "#f1f5f9"], [0.25, "#eeeeee"], [0.50, "#d9ead3"], [0.75, "#fce5cd"], [1.00, "#6fa8dc"]]
 
 
 # -------------------------------------------------
@@ -102,16 +104,18 @@ def build_sample_df():
 
 def normalize_status(value):
     if pd.isna(value) or str(value).strip() == "":
-        return "Completed"
-    cleaned = str(value).strip().title()
-    return cleaned if cleaned in VALID_STATUSES else "Completed"
+        return "Blank"
+    raw = str(value).strip()
+    status_lookup = {status.lower(): status for status in VALID_STATUSES}
+    cleaned = status_lookup.get(raw.lower())
+    return cleaned if cleaned else "Blank"
 
 
 def normalize_source_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     for col in REQUIRED_COLUMNS:
         if col not in df.columns:
-            df[col] = "Completed" if col == "status" else ""
+            df[col] = "Blank" if col == "status" else ""
     df = df[REQUIRED_COLUMNS].dropna(how="all").copy()
     df["state"] = df["state"].fillna("").astype(str).str.strip().str.upper()
     df["state_name"] = df["state"].map(STATE_NAME_LOOKUP).fillna(df["state_name"])
@@ -205,6 +209,7 @@ def prepare_map_df(race_df: pd.DataFrame) -> pd.DataFrame:
         states_df["completed_races"] = 0
         states_df["registered_races"] = 0
         states_df["interested_races"] = 0
+        states_df["available_signup_races"] = 0
         states_df["unique_runners"] = 0
         states_df["map_status"] = "Empty"
         states_df["color_value"] = 0
@@ -217,13 +222,14 @@ def prepare_map_df(race_df: pd.DataFrame) -> pd.DataFrame:
             completed_races=("status", lambda s: (s == "Completed").sum()),
             registered_races=("status", lambda s: (s == "Registered").sum()),
             interested_races=("status", lambda s: (s == "Interested").sum()),
+            available_signup_races=("status", lambda s: (s == "Available for Signup").sum()),
             unique_runners=("runner_name", "nunique"),
         )
         .reset_index()
     )
 
     map_df = states_df.merge(summary, on=["state", "state_name"], how="left")
-    for col in ["total_races", "completed_races", "registered_races", "interested_races", "unique_runners"]:
+    for col in ["total_races", "completed_races", "registered_races", "interested_races", "available_signup_races", "unique_runners"]:
         map_df[col] = map_df[col].fillna(0).astype(int)
 
     def status_label(row) -> str:
@@ -233,6 +239,8 @@ def prepare_map_df(race_df: pd.DataFrame) -> pd.DataFrame:
             return "Registered"
         if row["interested_races"] > 0:
             return "Interested"
+        if row["available_signup_races"] > 0:
+            return "Available for Signup"
         return "Empty"
 
     map_df["map_status"] = map_df.apply(status_label, axis=1)
@@ -355,14 +363,14 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
                 {
                     "state": state_code,
                     "state_name": STATE_NAME_LOOKUP.get(state_code, state_code),
-                    "runner_name": "API Future Race",
+                    "runner_name": "Future Races",
                     "race_type": detect_race_type_from_events(events),
                     "race_name": race.get("name", ""),
                     "race_date": race.get("next_date", ""),
                     "finish_time": "",
                     "city": address.get("city", ""),
                     "notes": race_url,
-                    "status": "Interested",
+                    "status": "Available for Signup",
                 }
             )
 
@@ -402,7 +410,7 @@ with st.sidebar:
     show_api_future_races = st.toggle(
         "Show RunSignUp future races for CO + SD",
         value=False,
-        help="Prototype toggle. Pulls 12 months of future RunSignUp races for Colorado and South Dakota and treats them as Interested rows.",
+        help="Prototype toggle. Pulls 12 months of future RunSignUp races for Colorado and South Dakota and keeps them separate as Available for Signup rows.",
     )
 
     if st.button("Pull CO + SD Future Races"):
@@ -447,11 +455,12 @@ filtered_race_df = race_df[
 
 filtered_map_df = prepare_map_df(filtered_race_df)
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("States Completed", int((filtered_map_df["map_status"] == "Completed").sum()))
 col2.metric("States Registered", int((filtered_map_df["map_status"] == "Registered").sum()))
 col3.metric("States Interested", int((filtered_map_df["map_status"] == "Interested").sum()))
-col4.metric("Total Entries", len(filtered_race_df))
+col4.metric("States Available", int((filtered_map_df["map_status"] == "Available for Signup").sum()))
+col5.metric("Total Entries", len(filtered_race_df))
 
 map_page, graphs_page, manage_page = st.tabs(["🗺️ Map", "📊 Graphs", "🛠️ Data Management"])
 
@@ -461,10 +470,10 @@ map_page, graphs_page, manage_page = st.tabs(["🗺️ Map", "📊 Graphs", "�
 # -------------------------------------------------
 with map_page:
     st.subheader("US Map")
-    st.caption("Status priority: Completed beats Registered, Registered beats Interested, and empty states stay blank.")
+    st.caption("Status priority: Completed beats Registered, Registered beats Interested, then Available for Signup, and empty states stay blank.")
 
     if show_api_future_races:
-        st.info("RunSignUp future race overlay is ON. CO + SD API rows are included if you have clicked the sidebar pull button.")
+        st.info("RunSignUp future race overlay is ON. CO + SD API rows are included as Available for Signup if you have clicked the sidebar pull button.")
 
     if not st.session_state.runsignup_future_races.empty:
         with st.expander("Preview RunSignUp API future rows"):
@@ -486,9 +495,10 @@ with map_page:
             "completed_races": True,
             "registered_races": True,
             "interested_races": True,
+            "available_signup_races": True,
         },
         color_continuous_scale=STATUS_COLOR_SCALE,
-        range_color=(0, 3),
+        range_color=(0, 4),
     )
 
     fig.update_traces(marker_line_color="white", marker_line_width=1)
@@ -537,8 +547,8 @@ with map_page:
             y=-0.03,
             len=0.65,
             thickness=9,
-            tickvals=[0, 1, 2, 3],
-            ticktext=["Empty", "Interested", "Registered", "Completed"],
+            tickvals=[0, 1, 2, 3, 4],
+            ticktext=["Empty", "Available", "Interested", "Registered", "Completed"],
         ),
     )
 
@@ -570,11 +580,12 @@ with map_page:
         if state_runs.empty:
             st.info("No matching race data for this state under the current filters.")
         else:
-            s1, s2, s3, s4 = st.columns(4)
+            s1, s2, s3, s4, s5 = st.columns(5)
             s1.metric("Entries", len(state_runs))
             s2.metric("Completed", int((state_runs["status"] == "Completed").sum()))
-            s3.metric("Future", int(state_runs["status"].isin(["Registered", "Interested"]).sum()))
-            s4.metric("Best Time", best_time_for_group(state_runs))
+            s3.metric("Planned", int(state_runs["status"].isin(["Registered", "Interested"]).sum()))
+            s4.metric("Available", int((state_runs["status"] == "Available for Signup").sum()))
+            s5.metric("Best Time", best_time_for_group(state_runs))
             display_race_table(state_runs)
     else:
         st.info("Click a state on the map or choose one from the dropdown to view race details.")
@@ -590,7 +601,7 @@ with graphs_page:
         st.info("No data available for the selected filters.")
     else:
         completed_df = filtered_race_df[filtered_race_df["status"] == "Completed"].copy()
-        future_df = filtered_race_df[filtered_race_df["status"].isin(["Registered", "Interested"])].copy()
+        future_df = filtered_race_df[filtered_race_df["status"].isin(["Registered", "Interested", "Available for Signup"])].copy()
 
         st.markdown("#### Entries by Status")
         status_counts = filtered_race_df.groupby("status").size().reset_index(name="count")
@@ -613,11 +624,11 @@ with graphs_page:
             yearly_fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), xaxis_title="Year", yaxis_title="Completed Races")
             st.plotly_chart(yearly_fig, use_container_width=True)
 
-        st.markdown("#### Upcoming Registered / Interested Races")
+        st.markdown("#### Upcoming Registered / Interested / Available Races")
         today_ts = pd.Timestamp(date.today())
         upcoming_df = future_df[future_df["race_date"] >= today_ts].sort_values("race_date")
         if upcoming_df.empty:
-            st.info("No upcoming registered or interested races found.")
+            st.info("No upcoming registered, interested, or available signup races found.")
         else:
             upcoming_display = upcoming_df[
                 ["status", "runner_name", "race_type", "race_name", "city", "state", "race_date_display", "notes"]
@@ -680,6 +691,75 @@ with manage_page:
                 st.rerun()
 
     st.divider()
+    st.subheader("Copy an API Future Race")
+    st.caption("API rows stay separate as Available for Signup. Use this to copy one into your personal race list as Interested or Registered.")
+
+    api_copy_df = st.session_state.runsignup_future_races.copy().reset_index(drop=True)
+    if api_copy_df.empty:
+        st.info("No API future races loaded yet. Use the sidebar button to pull CO + SD future races first.")
+    else:
+        api_labels = [
+            f"{idx}: {row['race_date']} | {row['state']} | {row['city']} | {row['race_name']}"
+            for idx, row in api_copy_df.iterrows()
+        ]
+        selected_api_label = st.selectbox("Select API Race to Copy", api_labels, key="copy_api_race_select")
+        selected_api_index = int(selected_api_label.split(":", 1)[0])
+        selected_api_row = api_copy_df.loc[selected_api_index]
+
+        parsed_api_date = pd.to_datetime(selected_api_row["race_date"], errors="coerce")
+        default_api_date = parsed_api_date.date() if not pd.isna(parsed_api_date) else date.today()
+        all_state_names = [name for _, name in ALL_STATES]
+        default_api_state_index = (
+            all_state_names.index(selected_api_row["state_name"])
+            if selected_api_row["state_name"] in all_state_names
+            else 0
+        )
+        default_api_race_type_index = (
+            VALID_RACE_TYPES.index(selected_api_row["race_type"])
+            if selected_api_row["race_type"] in VALID_RACE_TYPES
+            else 0
+        )
+
+        with st.form("copy_api_race_form"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                copy_runner_name = st.text_input("Runner Name", value="", key="copy_runner_name")
+                copy_race_name = st.text_input("Race Name", value=selected_api_row["race_name"], key="copy_race_name")
+                copy_race_date = st.date_input("Race Date", value=default_api_date, key="copy_race_date")
+            with c2:
+                copy_state_name = st.selectbox("State", all_state_names, index=default_api_state_index, key="copy_state_name")
+                copy_city = st.text_input("City", value=selected_api_row["city"], key="copy_city")
+                copy_race_type = st.selectbox("Race Type", VALID_RACE_TYPES, index=default_api_race_type_index, key="copy_race_type")
+            with c3:
+                copy_status = st.selectbox("Status", COPY_TARGET_STATUSES, index=0, key="copy_status")
+                copy_finish_time = st.text_input("Finish Time", value="", placeholder="Usually blank for future races", key="copy_finish_time")
+                copy_notes = st.text_area("Notes", value=selected_api_row["notes"], height=100, key="copy_notes")
+
+            if st.form_submit_button("Copy to My Race List"):
+                if not copy_race_name.strip():
+                    st.error("Race Name is required.")
+                elif copy_status == "Blank":
+                    st.error("Choose Interested or Registered before copying this race into your list.")
+                else:
+                    copy_state_code = STATE_CODE_LOOKUP[copy_state_name]
+                    add_race_entry(
+                        {
+                            "state": copy_state_code,
+                            "state_name": copy_state_name,
+                            "runner_name": copy_runner_name,
+                            "race_type": copy_race_type,
+                            "race_name": copy_race_name,
+                            "race_date": copy_race_date.strftime("%Y-%m-%d"),
+                            "finish_time": copy_finish_time,
+                            "city": copy_city,
+                            "notes": copy_notes,
+                            "status": copy_status,
+                        }
+                    )
+                    st.success("API race copied into your personal race list.")
+                    st.rerun()
+
+    st.divider()
     st.subheader("Add One Race")
     with st.form("add_race_form", clear_on_submit=True):
         a1, a2, a3 = st.columns(3)
@@ -692,7 +772,7 @@ with manage_page:
             add_city = st.text_input("City")
             add_race_type = st.selectbox("Race Type", VALID_RACE_TYPES)
         with a3:
-            add_status = st.selectbox("Status", VALID_STATUSES)
+            add_status = st.selectbox("Status", USER_ENTRY_STATUSES)
             add_finish_time = st.text_input("Finish Time", placeholder="Required only for completed races")
             add_notes = st.text_area("Notes", height=100)
 
@@ -769,8 +849,8 @@ with manage_page:
             with e3:
                 edit_status = st.selectbox(
                     "Status",
-                    VALID_STATUSES,
-                    index=VALID_STATUSES.index(selected_row["status"]) if selected_row["status"] in VALID_STATUSES else 0,
+                    USER_ENTRY_STATUSES,
+                    index=USER_ENTRY_STATUSES.index(selected_row["status"]) if selected_row["status"] in USER_ENTRY_STATUSES else 0,
                 )
                 edit_finish_time = st.text_input("Finish Time", value=selected_row["finish_time"])
                 edit_notes = st.text_area("Notes", value=selected_row["notes"], height=100)
