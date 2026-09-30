@@ -14,10 +14,9 @@ st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 RUNSIGNUP_API_URL = "https://api.runsignup.com/rest/races"
 API_URL = RUNSIGNUP_API_URL  # optional alias, kept for consistency with the prototype
 
-# Hard-coded for now per your testing preference.
-# Best practice later: move these to .streamlit/secrets.toml before making the repo public.
-RUNSIGNUP_API_KEY = "b5joqX8Ur02116FakymNv5N8wlsCoNhO"
-RUNSIGNUP_API_SECRET = "rllMlmau5DQjlfFcVF0HUJ0ILzfi27gp"
+# Credentials live in .streamlit/secrets.toml locally and in the Streamlit Cloud
+# secrets manager when deployed. They are read via get_secret() below -- never
+# hard-code them here, since this repo is public.
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -294,7 +293,7 @@ def display_race_table(df: pd.DataFrame):
             "notes": "Notes",
         }
     )
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(display_df, width='stretch', hide_index=True)
 
 
 def detect_race_type_from_events(events) -> str:
@@ -318,8 +317,8 @@ def detect_race_type_from_events(events) -> str:
 
 def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
     """Pull 12 months of future RunSignUp races for one state and shape them like RunTracker rows."""
-    api_key = RUNSIGNUP_API_KEY or get_secret("RUNSIGNUP_API_KEY")
-    api_secret = RUNSIGNUP_API_SECRET or get_secret("RUNSIGNUP_API_SECRET")
+    api_key = get_secret("RUNSIGNUP_API_KEY")
+    api_secret = get_secret("RUNSIGNUP_API_SECRET")
 
     if not api_key or not api_secret:
         raise RuntimeError("Missing RunSignUp credentials. Add RUNSIGNUP_API_KEY and RUNSIGNUP_API_SECRET to Streamlit secrets.")
@@ -552,7 +551,7 @@ with map_page:
         ),
     )
 
-    selected = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points")
+    selected = st.plotly_chart(fig, width='stretch', on_select="rerun", selection_mode="points")
     st.caption("The legend was moved below the map and made horizontal so the US map has more room on mobile.")
 
     selected_state = None
@@ -607,13 +606,13 @@ with graphs_page:
         status_counts = filtered_race_df.groupby("status").size().reset_index(name="count")
         status_fig = px.bar(status_counts, x="status", y="count", text="count")
         status_fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), xaxis_title="Status", yaxis_title="Entries")
-        st.plotly_chart(status_fig, use_container_width=True)
+        st.plotly_chart(status_fig, width='stretch')
 
         st.markdown("#### Race Types")
         race_type_counts = filtered_race_df.groupby("race_type").size().reset_index(name="count")
         race_type_fig = px.bar(race_type_counts, x="race_type", y="count", text="count")
         race_type_fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), xaxis_title="Race Type", yaxis_title="Entries")
-        st.plotly_chart(race_type_fig, use_container_width=True)
+        st.plotly_chart(race_type_fig, width='stretch')
 
         st.markdown("#### Completed Races by Year")
         if completed_df.empty:
@@ -622,7 +621,7 @@ with graphs_page:
             yearly_counts = completed_df.groupby("race_year").size().reset_index(name="count")
             yearly_fig = px.bar(yearly_counts, x="race_year", y="count", text="count")
             yearly_fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), xaxis_title="Year", yaxis_title="Completed Races")
-            st.plotly_chart(yearly_fig, use_container_width=True)
+            st.plotly_chart(yearly_fig, width='stretch')
 
         st.markdown("#### Upcoming Registered / Interested / Available Races")
         today_ts = pd.Timestamp(date.today())
@@ -644,7 +643,7 @@ with graphs_page:
                     "notes": "Notes / URL",
                 }
             )
-            st.dataframe(upcoming_display, use_container_width=True, hide_index=True)
+            st.dataframe(upcoming_display, width='stretch', hide_index=True)
 
         st.markdown("#### All Race Entries")
         display_race_table(filtered_race_df.sort_values(["race_date", "runner_name"], ascending=[False, True]))
@@ -677,7 +676,7 @@ with manage_page:
     if uploaded_file is not None:
         uploaded_df = pd.read_csv(uploaded_file)
         st.write("Preview of uploaded file:")
-        st.dataframe(uploaded_df, use_container_width=True, hide_index=True)
+        st.dataframe(uploaded_df, width='stretch', hide_index=True)
         errors = validate_uploaded_csv(uploaded_df)
         if errors:
             st.error("CSV validation failed:")

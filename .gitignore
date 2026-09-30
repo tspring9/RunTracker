@@ -1,0 +1,22 @@
+# Streamlit secrets -- must never be committed
+.streamlit/secrets.toml
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Generated RunSignUp data pulls (large, regenerable)
+data/
