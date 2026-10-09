@@ -32,6 +32,10 @@ HIGH = "High"
 POSSIBLE = "Possible"
 REJECTED = "Rejected"
 
+# Upper bound for a believable finisher age. Anything above this is treated as
+# missing data rather than a real age -- see parse_result_age.
+MAX_PLAUSIBLE_AGE = 120
+
 _WHITESPACE_RE = re.compile(r"\s+")
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -89,7 +93,16 @@ def age_on_date(birth_date: date, event_date: date) -> int:
 
 
 def parse_result_age(raw) -> int | None:
-    """RunSignUp 'age' field. "" / None / non-numeric / <=0 -> None."""
+    """RunSignUp 'age' field. "" / None / non-numeric / out-of-range -> None.
+
+    Ages outside ``1..MAX_PLAUSIBLE_AGE`` are treated as *missing*, not as a
+    value to compare against. RunSignUp really does publish junk here -- a
+    live result set checked on 2026-10-09 contained ``age=952``. Comparing
+    against that would classify the row **Rejected** ("off by 912 years") and
+    hide a result that might genuinely be yours, when the honest answer is
+    that the race published no usable age. Falling back to None routes it to
+    "Possible" instead, which is what an unknown age means.
+    """
     if raw is None:
         return None
     if isinstance(raw, bool):
@@ -101,7 +114,7 @@ def parse_result_age(raw) -> int | None:
         age = int(float(text))
     except (TypeError, ValueError):
         return None
-    return age if age > 0 else None
+    return age if 1 <= age <= MAX_PLAUSIBLE_AGE else None
 
 
 def classify_confidence(age_on_race_date: int | None, result_age: int | None) -> tuple[str, str]:

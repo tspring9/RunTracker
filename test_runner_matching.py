@@ -66,6 +66,30 @@ def test_parse_result_age_accepts_positive_whole_numbers(raw):
     assert matching.parse_result_age(raw) == 41
 
 
+# 952 is not hypothetical: it is a real published age observed in RunSignUp
+# result set race=2017/event=4002/set=10 on 2026-10-09.
+@pytest.mark.parametrize("raw", [952, "952", 121, 1000])
+def test_parse_result_age_treats_implausible_ages_as_missing(raw):
+    assert matching.parse_result_age(raw) is None
+
+
+@pytest.mark.parametrize("raw", [1, 120])
+def test_parse_result_age_keeps_the_plausible_boundaries(raw):
+    assert matching.parse_result_age(raw) == raw
+
+
+def test_implausible_published_age_is_possible_not_rejected():
+    """A junk age must not hide a row that might be yours.
+
+    Before the range check, age=952 against a real age of 40 classified
+    Rejected ("off by 912 years"), collapsing a potentially genuine result
+    out of sight. Unknown is the honest verdict.
+    """
+    confidence, reason = matching.classify_confidence(40, matching.parse_result_age(952))
+    assert confidence == matching.POSSIBLE
+    assert "no age" in reason.lower()
+
+
 def test_normalize_name_casefolds_and_collapses_whitespace():
     assert matching.normalize_name("  Mary  Jane \t") == "mary jane"
     assert matching.names_match("thomas", "spring", "Thomas", "Spring")

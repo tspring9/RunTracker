@@ -1056,6 +1056,25 @@ with signup_page:
             c4.write(row.get("finish_time", "") or "—")
             age_display = row["_result_age"] if row["_result_age"] is not None else "—"
             c5.write(f"Age: {age_display}")
+
+            # Who this result actually belongs to. Name matching is exact on
+            # first AND last, so every row here shares your name -- but a
+            # genuine namesake is indistinguishable from you without this.
+            # Hometown is the only other identifying field RunSignUp publishes,
+            # and it is often what tells you "that is not me" at a glance.
+            published_name = " ".join(
+                part for part in (raw.get("first_name", ""), raw.get("last_name", "")) if part
+            ).strip()
+            hometown = ", ".join(
+                part for part in (raw.get("city", ""), raw.get("state", "")) if part
+            ).strip()
+            identity_bits = [f"Listed as **{published_name or 'name not published'}**"]
+            if hometown:
+                identity_bits.append(hometown)
+            if raw.get("bib"):
+                identity_bits.append(f"bib {raw['bib']}")
+            st.caption(" · ".join(identity_bits))
+
             if show_reason:
                 st.caption(row["_reason"])
 
@@ -1086,11 +1105,15 @@ with signup_page:
         for idx, row in enumerate(high):
             _render_match_row("high", idx, row, show_reason=False)
 
-        st.markdown(f"#### Possible ({len(possible)})")
-        if not possible:
-            st.caption("No possible matches yet.")
-        for idx, row in enumerate(possible):
-            _render_match_row("possible", idx, row, show_reason=True)
+        # Collapsed by default, like Rejected. Most "Possible" rows are results
+        # RunSignUp published without an age, which means a same-name stranger
+        # cannot be told apart from you by the only signal we have. Showing
+        # those expanded buries your real races under other people's.
+        with st.expander(f"Possible ({len(possible)}) — same name, age unconfirmed", expanded=False):
+            if not possible:
+                st.caption("No possible matches yet.")
+            for idx, row in enumerate(possible):
+                _render_match_row("possible", idx, row, show_reason=True)
 
         with st.expander(f"Rejected ({len(rejected)})", expanded=False):
             for idx, row in enumerate(rejected):
