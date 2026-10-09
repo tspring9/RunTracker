@@ -91,5 +91,119 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(mock_sets.call_count, 8)
 
 
+class TrackerSearchTests(unittest.TestCase):
+    def test_name_split_requires_nonblank_and_preserves_first_and_surname(self):
+        self.assertEqual(rsu.split_runner_name(" Thomas   Springhower "), ("Thomas", "Springhower"))
+        self.assertEqual(rsu.split_runner_name("Olivia"), ("Olivia", ""))
+        with self.assertRaises(ValueError):
+            rsu.split_runner_name("  ")
+
+    def test_race_confirmation_requires_matching_state_and_nearby_date(self):
+        tracked = {"state": "MO", "race_date": "2026-05-16"}
+        self.assertTrue(
+            rsu.race_match_is_confirmed(
+                tracked, {"state": "mo", "next_date": "2026-05-20"}
+            )
+        )
+        self.assertFalse(
+            rsu.race_match_is_confirmed(
+                tracked, {"state": "KS", "next_date": "2026-05-16"}
+            )
+        )
+        self.assertFalse(
+            rsu.race_match_is_confirmed(
+                tracked, {"state": "MO", "next_date": "2026-06-16"}
+            )
+        )
+
+    @patch("runsignup_results.find_runner_results")
+    @patch("runsignup_results.search_races")
+    def test_full_name_searches_only_uniquely_confirmed_race(self, mock_search, mock_find):
+        mock_search.return_value = [
+            {
+                "race_id": 85066,
+                "name": "Hospital Hill Run",
+                "state": "MO",
+                "next_date": "2026-05-16",
+            }
+        ]
+        mock_find.return_value = [{"runner_name": "thomas springhower"}]
+
+        reports = rsu.search_tracker_results(
+            "Thomas Springhower",
+            [
+                {
+                    "race_name": "Hospital Hill Run",
+                    "race_date": "2026-05-16",
+                    "state": "MO",
+                }
+            ],
+        )
+
+        self.assertEqual(reports[0]["status"], "searched")
+        self.assertEqual(reports[0]["count"], 1)
+        self.assertFalse(reports[0]["ambiguous"])
+        mock_find.assert_called_once_with(
+            85066,
+            first_name="Thomas",
+            last_name="Springhower",
+            include_virtual=False,
+            max_event_days=rsu.DEFAULT_DISCOVERY_EVENT_DAYS,
+        )
+
+    @patch("runsignup_results.find_runner_results")
+    @patch("runsignup_results.search_races")
+    def test_first_name_only_reports_candidates_as_ambiguous(self, mock_search, mock_find):
+        mock_search.return_value = [
+            {
+                "race_id": 85066,
+                "name": "Hospital Hill Run",
+                "state": "MO",
+                "next_date": "2026-05-16",
+            }
+        ]
+        mock_find.return_value = [{"runner_name": f"Olivia {index}"} for index in range(22)]
+
+        [report] = rsu.search_tracker_results(
+            "Olivia",
+            [
+                {
+                    "race_name": "Hospital Hill Run",
+                    "race_date": "2026-05-16",
+                    "state": "MO",
+                }
+            ],
+        )
+
+        self.assertTrue(report["ambiguous"])
+        self.assertEqual(report["count"], 22)
+
+    @patch("runsignup_results.find_runner_results")
+    @patch("runsignup_results.search_races")
+    def test_unconfirmed_hit_needs_linking_and_is_not_searched(self, mock_search, mock_find):
+        mock_search.return_value = [
+            {
+                "race_id": 99,
+                "name": "Early Bird Run",
+                "state": "MD",
+                "next_date": "2026-04-04",
+            }
+        ]
+
+        [report] = rsu.search_tracker_results(
+            "Rachel Ballard",
+            [
+                {
+                    "race_name": "Early Bird Run",
+                    "race_date": "2026-04-04",
+                    "state": "NE",
+                }
+            ],
+        )
+
+        self.assertEqual(report["status"], "needs_linking")
+        mock_find.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

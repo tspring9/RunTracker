@@ -19,6 +19,7 @@ from the command line without Streamlit:
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Iterable
@@ -39,6 +40,7 @@ HOSPITAL_HILL_RACE_ID = 85066
 # RunSignUp caps a results page at 1000 rows.
 MAX_RESULTS_PER_PAGE = 1000
 DEFAULT_DISCOVERY_EVENT_DAYS = 5
+DEFAULT_RACE_DATE_TOLERANCE_DAYS = 7
 
 # Mirrors RunTracker's VALID_RACE_TYPES. Longest/most specific patterns first so
 # "Virtual Half Marathon" does not get mistaken for a 10K etc.
@@ -169,6 +171,47 @@ def _race_event_dates(race: dict) -> list[str]:
         if (parsed := parse_event_date(event.get("start_time")))
     }
     return sorted(dates)
+
+
+def split_runner_name(runner_name: str) -> tuple[str, str]:
+    """Return first/last search terms, leaving last blank for one-word names."""
+    parts = str(runner_name or "").split()
+    if not parts:
+        raise ValueError("Runner name is required.")
+    return parts[0], parts[-1] if len(parts) > 1 else ""
+
+
+def race_match_is_confirmed(
+    tracker_race: dict,
+    candidate: dict,
+    tolerance_days: int = DEFAULT_RACE_DATE_TOLERANCE_DAYS,
+) -> bool:
+    """Confirm a search hit using state and date, never fuzzy name alone."""
+    tracker_state = str(tracker_race.get("state") or "").strip().casefold()
+    candidate_state = str(candidate.get("state") or "").strip().casefold()
+    if not tracker_state or tracker_state != candidate_state:
+        return False
+
+    try:
+        tracker_date = date.fromisoformat(str(tracker_race.get("race_date") or ""))
+        candidate_date = date.fromisoformat(str(candidate.get("next_date") or ""))
+    except ValueError:
+        return False
+    return abs((candidate_date - tracker_date).days) <= int(tolerance_days)
+
+
+def unique_tracker_races(rows: Iterable[dict]) -> list[dict]:
+    """Collapse duplicate runner rows for the same tracked race occurrence."""
+    unique = {}
+    for row in rows:
+        key = (
+            str(row.get("race_name") or "").strip().casefold(),
+            str(row.get("state") or "").strip().casefold(),
+            str(row.get("race_date") or "").strip(),
+        )
+        if key[0]:
+            unique.setdefault(key, row)
+    return list(unique.values())
 
 
 # -------------------------------------------------
@@ -422,6 +465,7 @@ def find_runner_results(
     include_virtual: bool = False,
     result_sets: Iterable[dict] | None = None,
     since_date: str = "",
+    max_event_days: int | None = DEFAULT_DISCOVERY_EVENT_DAYS,
 ) -> list[dict]:
     """Search every public result set on a race for one runner.
 
@@ -434,7 +478,12 @@ def find_runner_results(
     if result_sets is not None:
         contexts = list(result_sets)
     else:
-        contexts = discover_result_sets(race_id, include_virtual, since_date=since_date)
+        contexts = discover_result_sets(
+            race_id,
+            include_virtual,
+            since_date=since_date,
+            max_event_days=max_event_days,
+        )
 
     rows = []
     for context in contexts:
@@ -459,6 +508,61 @@ def find_runner_results(
 
     rows.sort(key=lambda row: row.get("race_date", ""), reverse=True)
     return rows
+
+
+def search_tracker_results(
+    runner_name: str,
+    tracker_races: Iterable[dict],
+    include_virtual: bool = False,
+    max_event_days: int | None = DEFAULT_DISCOVERY_EVENT_DAYS,
+) -> list[dict]:
+    """Search a runner across safely confirmed races already in the tracker."""
+    first_name, last_name = split_runner_name(runner_name)
+    ambiguous = not bool(last_name)
+    reports = []
+
+    for tracker_race in unique_tracker_races(tracker_races):
+        report = {
+            "race_name": tracker_race.get("race_name", ""),
+            "race_date": tracker_race.get("race_date", ""),
+            "state": tracker_race.get("state", ""),
+            "status": "needs_linking",
+            "count": 0,
+            "ambiguous": ambiguous,
+        }
+        try:
+            candidates = search_races(
+                tracker_race.get("race_name", ""),
+                state=tracker_race.get("state") or None,
+            )
+            confirmed = [
+                candidate
+                for candidate in candidates
+                if race_match_is_confirmed(tracker_race, candidate)
+            ]
+            if len(confirmed) != 1:
+                report["candidate_count"] = len(candidates)
+                reports.append(report)
+                continue
+
+            match = confirmed[0]
+            rows = find_runner_results(
+                match["race_id"],
+                first_name=first_name,
+                last_name=last_name,
+                include_virtual=include_virtual,
+                max_event_days=max_event_days,
+            )
+            report.update(
+                status="searched",
+                count=len(rows),
+                race_id=match["race_id"],
+                matched_race_name=match.get("name", ""),
+            )
+        except (RunSignUpError, requests.RequestException, ValueError) as exc:
+            report.update(status="error", error=str(exc))
+        reports.append(report)
+    return reports
 
 
 # -------------------------------------------------
@@ -491,10 +595,53 @@ if __name__ == "__main__":
     parser.add_argument("--first-name", default="")
     parser.add_argument("--last-name", default="")
     parser.add_argument("--include-virtual", action="store_true")
+    parser.add_argument("--runner", default="", help="Runner name to search for.")
+    parser.add_argument("--from-tracker", action="store_true", help="Search saved tracker races.")
+    parser.add_argument(
+        "--user-id",
+        default=os.getenv("RUNTRACKER_USER_ID", "default"),
+        help="Tracker user id (default: RUNTRACKER_USER_ID or 'default').",
+    )
+    parser.add_argument(
+        "--wide-sweep",
+        action="store_true",
+        help="Opt into discovery across every historical event day.",
+    )
     parser.add_argument("--list-sets", action="store_true", help="List public result sets and exit.")
     args = parser.parse_args()
 
-    if args.list_sets or not (args.first_name or args.last_name):
+    if args.from_tracker:
+        import storage
+
+        if not args.runner.strip():
+            parser.error("--runner is required with --from-tracker")
+        reports = search_tracker_results(
+            args.runner,
+            storage.load_races(args.user_id),
+            include_virtual=args.include_virtual,
+            max_event_days=None if args.wide_sweep else DEFAULT_DISCOVERY_EVENT_DAYS,
+        )
+        confident_total = 0
+        candidate_total = 0
+        for report in reports:
+            label = f"{report['race_name']} ({report['race_date']}, {report['state']})"
+            if report["status"] == "searched":
+                if report["ambiguous"]:
+                    candidate_total += report["count"]
+                    print(f"AMBIGUOUS {label}: {report['count']} candidate result(s)")
+                else:
+                    confident_total += report["count"]
+                    print(f"{label}: {report['count']} result(s)")
+            elif report["status"] == "needs_linking":
+                print(f"NEEDS LINKING {label}: no confirmed RunSignUp race")
+            else:
+                print(f"ERROR {label}: {report['error']}")
+        if any(report["ambiguous"] for report in reports):
+            print(f"Total: 0 confident result(s); {candidate_total} ambiguous candidate(s)")
+        else:
+            print(f"Total: {confident_total} result(s)")
+        raise SystemExit(1 if any(report["status"] == "error" for report in reports) else 0)
+    elif args.list_sets or not (args.first_name or args.last_name):
         sets = discover_result_sets(args.race_id, include_virtual=args.include_virtual)
         print(f"{len(sets)} public result set(s) for race {args.race_id}:")
         for entry in sets:
