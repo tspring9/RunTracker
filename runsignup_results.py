@@ -11,14 +11,44 @@ Three things to know, because they are what blocked earlier attempts:
    needed for the registration-side endpoints, so the whole results feature
    works without secrets configured.
 
+API caller registration (hard deadline 2027-01-01)
+--------------------------------------------------
+Point 3 above stops being the whole story on **2027-01-01**. RunSignUp now
+requires every API caller to register, and from that date calls without a
+valid registration token are rejected -- including the unauthenticated public
+results calls this module makes today. See
+https://info.runsignup.com/2026/07/17/new-api-registration-requirements/
+
+Registration is free and is a *user* action (RunSignUp login -> API Keys ->
+"Register as an API caller"). It yields two values, which this module reads
+from Streamlit secrets or environment variables:
+
+    RUNSIGNUP_API_REG_TOKEN   -> sent as the ``rsu_api_reg`` GET parameter
+    RUNSIGNUP_API_REG_SECRET  -> sent as the ``X-RSU-API-REG-SECRET`` header
+
+Both are optional *until* the cutover: with neither set every call goes out
+exactly as it did before, so local dev and the test suite keep working
+unauthenticated. That is deliberate -- it lets this plumbing merge well ahead
+of the deadline instead of being a flag-day change.
+
+Two other limits from the same announcement, worth knowing before you add
+callers: the API allows only **2 concurrent calls** (everything here issues
+requests sequentially, so that is headroom, not a constraint -- but do not
+fan these calls out in threads), and data requests are documented as limited
+to **one year back**. Whether that one-year window is enforced on the public
+results endpoints is an open question; it has not bitten us because
+unregistered calls still return 2019 listings today.
+
 Everything here is plain ``requests`` + dicts so it can be unit tested and run
 from the command line without Streamlit:
 
     python runsignup_results.py --race-id 85066 --last-name Springhower
+    python runsignup_results.py --check-registration
 """
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Iterable
@@ -32,6 +62,21 @@ from urllib3.util.retry import Retry
 # -------------------------------------------------
 RESULTS_API_HOST = "https://runsignup.com/rest"
 DEFAULT_TIMEOUT = 30
+
+# -------------------------------------------------
+# API caller registration (see module docstring)
+# -------------------------------------------------
+# Wire names are fixed by RunSignUp; the *_SETTING names are ours.
+API_REG_TOKEN_PARAM = "rsu_api_reg"
+API_REG_SECRET_HEADER = "X-RSU-API-REG-SECRET"
+API_REG_TOKEN_SETTING = "RUNSIGNUP_API_REG_TOKEN"
+API_REG_SECRET_SETTING = "RUNSIGNUP_API_REG_SECRET"
+
+# The date unregistered calls start being rejected.
+API_REG_ENFORCEMENT_DATE = "2027-01-01"
+
+# RunSignUp's error_code for "Invalid API caller credentials." (HTTP 400).
+API_REG_INVALID_ERROR_CODE = 17
 
 # Hospital Hill Run -- the race we are building against first.
 HOSPITAL_HILL_RACE_ID = 85066
@@ -54,9 +99,123 @@ class RunSignUpError(RuntimeError):
     """Raised when RunSignUp returns an API-level error payload."""
 
 
+class RunSignUpRegistrationError(RunSignUpError):
+    """Raised when RunSignUp rejects our API caller registration.
+
+    A subclass of ``RunSignUpError`` so existing ``except RunSignUpError``
+    handlers keep working, but distinguishable because the fix is completely
+    different: this one is never transient and never about the race being
+    asked for -- it is bad config.
+    """
+
+
+# -------------------------------------------------
+# API caller registration config
+# -------------------------------------------------
+def _setting(name: str, default: str = "") -> str:
+    """Read a setting from Streamlit secrets first, then environment variables.
+
+    Same pattern as ``get_db_path`` in storage.py. Importing streamlit lazily
+    (and swallowing the failure) is what keeps this module usable from the CLI
+    and from pytest, where there is no Streamlit runtime at all.
+    """
+    try:
+        import streamlit as st
+
+        if name in st.secrets:
+            return str(st.secrets[name]).strip()
+    except Exception:
+        pass
+    return str(os.getenv(name, default)).strip()
+
+
+def api_registration() -> tuple[str, str]:
+    """``(token, secret)`` for this app's RunSignUp API caller registration.
+
+    ``("", "")`` means unregistered, which is still valid until
+    ``API_REG_ENFORCEMENT_DATE``.
+    """
+    return _setting(API_REG_TOKEN_SETTING), _setting(API_REG_SECRET_SETTING)
+
+
+def registration_notes() -> list[str]:
+    """Human-readable warnings about the current registration config.
+
+    Returned rather than logged so the CLI, app.py, and tests can each decide
+    how loudly to surface them.
+    """
+    token, secret = api_registration()
+    notes = []
+    if not token and not secret:
+        notes.append(
+            f"Not registered as a RunSignUp API caller. Calls still work today but are "
+            f"rejected from {API_REG_ENFORCEMENT_DATE}. Register (free) at RunSignUp -> "
+            f"API Keys -> 'Register as an API caller', then set {API_REG_TOKEN_SETTING} "
+            f"and {API_REG_SECRET_SETTING}."
+        )
+    elif not token:
+        notes.append(f"{API_REG_SECRET_SETTING} is set but {API_REG_TOKEN_SETTING} is missing; calls go out unregistered.")
+    elif not secret:
+        notes.append(f"{API_REG_TOKEN_SETTING} is set but {API_REG_SECRET_SETTING} is missing; RunSignUp will reject the token.")
+    elif "." not in token:
+        # Documented format is "<id>.<token>". Warn, don't block -- a format
+        # change on RunSignUp's side should not take the app down.
+        notes.append(f"{API_REG_TOKEN_SETTING} does not look like the documented '<id>.<token>' format.")
+    return notes
+
+
 # -------------------------------------------------
 # Low-level request helper
 # -------------------------------------------------
+def _apply_api_registration(session: requests.Session, params: dict) -> dict:
+    """Attach the API caller registration to one outgoing request.
+
+    A clean no-op when nothing is configured: no parameter, no header, and any
+    stale header from an earlier config is dropped. Called from ``_get`` (not
+    just ``_build_session``) because the module-level session is built at import
+    time, before Streamlit secrets are necessarily readable.
+    """
+    token, secret = api_registration()
+
+    if token:
+        params.setdefault(API_REG_TOKEN_PARAM, token)
+    if secret:
+        session.headers[API_REG_SECRET_HEADER] = secret
+    else:
+        session.headers.pop(API_REG_SECRET_HEADER, None)
+
+    return params
+
+
+def raise_for_bad_registration(response: requests.Response) -> None:
+    """Turn RunSignUp's registration rejection into an actionable error.
+
+    Verified live against both endpoints on 2026-10-09: sending a token that
+    RunSignUp does not recognise returns HTTP 400 with ``error_code`` 17,
+    ``"Invalid API caller credentials."`` -- on *every* call. So a mis-pasted
+    token is strictly worse than no token at all, and it must not be reported
+    as a generic "RunSignUp HTTP 400", which reads like a RunSignUp outage and
+    sends whoever is on call looking in the wrong place.
+    """
+    if response.status_code != 400:
+        return
+    try:
+        error = (response.json() or {}).get("error") or {}
+    except ValueError:
+        return
+    if error.get("error_code") != API_REG_INVALID_ERROR_CODE:
+        return
+
+    token, secret = api_registration()
+    reason = str(error.get("error_msg") or "invalid credentials").rstrip(".")
+    raise RunSignUpRegistrationError(
+        f"RunSignUp rejected our API caller registration: {reason}. "
+        f"Check {API_REG_TOKEN_SETTING} (currently {'set' if token else 'UNSET'}) and "
+        f"{API_REG_SECRET_SETTING} (currently {'set' if secret else 'UNSET'}) against RunSignUp -> API Keys. "
+        f"Clearing both restores unregistered access until {API_REG_ENFORCEMENT_DATE}."
+    )
+
+
 def _build_session() -> requests.Session:
     """Create a connection-pooled client with bounded transient retries."""
     retry = Retry(
@@ -72,6 +231,7 @@ def _build_session() -> requests.Session:
     session = requests.Session()
     session.headers.update({"User-Agent": "RunTracker/1.0 (+public RunSignUp client)"})
     session.mount("https://", adapter)
+    _apply_api_registration(session, {})
     return session
 
 
@@ -81,9 +241,11 @@ _SESSION = _build_session()
 def _get(path: str, **params) -> dict:
     """GET a RunSignUp REST path and raise on both HTTP and API-level errors."""
     params.setdefault("format", "json")
+    _apply_api_registration(_SESSION, params)
     response = _SESSION.get(f"{RESULTS_API_HOST}{path}", params=params, timeout=DEFAULT_TIMEOUT)
 
     if response.status_code != 200:
+        raise_for_bad_registration(response)
         raise RunSignUpError(f"RunSignUp HTTP {response.status_code} for {path}: {response.text[:500]}")
 
     payload = response.json()
@@ -492,7 +654,30 @@ if __name__ == "__main__":
     parser.add_argument("--last-name", default="")
     parser.add_argument("--include-virtual", action="store_true")
     parser.add_argument("--list-sets", action="store_true", help="List public result sets and exit.")
+    parser.add_argument(
+        "--check-registration",
+        action="store_true",
+        help="Report the API caller registration config, make one live call, and exit.",
+    )
     args = parser.parse_args()
+
+    if args.check_registration:
+        token, secret = api_registration()
+        print("RunSignUp API caller registration")
+        # Only the id half of "<id>.<token>" is printed; never the secret.
+        print(f"  {API_REG_TOKEN_SETTING}:  {token.split('.')[0] + '.***' if token else '(unset)'}")
+        print(f"  {API_REG_SECRET_SETTING}: {'(set)' if secret else '(unset)'}")
+        print(f"  sending {API_REG_TOKEN_PARAM} param:        {'yes' if token else 'no'}")
+        print(f"  sending {API_REG_SECRET_HEADER} header: {'yes' if secret else 'no'}")
+        for note in registration_notes():
+            print(f"  ! {note}")
+        try:
+            race = fetch_race(args.race_id)
+            print(f"  live call OK: race {args.race_id} -> {race.get('name', '?')}")
+        except Exception as exc:  # noqa: BLE001 - CLI smoke test, report anything
+            print(f"  live call FAILED: {type(exc).__name__}: {exc}")
+            raise SystemExit(1)
+        raise SystemExit(0)
 
     if args.list_sets or not (args.first_name or args.last_name):
         sets = discover_result_sets(args.race_id, include_virtual=args.include_virtual)

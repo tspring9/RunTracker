@@ -24,6 +24,13 @@ API_URL = RUNSIGNUP_API_URL  # optional alias, kept for consistency with the pro
 #
 # NOTE: the public *results* endpoints need no credentials at all. See
 # runsignup_results.py. Only the race-search endpoint below benefits from a key.
+#
+# Separate from api_key/api_secret: every RunSignUp API caller must now be
+# *registered*, and from 2027-01-01 unregistered calls are rejected. That
+# applies to this endpoint too, not just the results client, so the race search
+# below sends the same registration token/header. Config and rationale live in
+# runsignup_results.py; this file just reuses them so there is one source of
+# truth for the two setting names.
 
 # Hospital Hill Run is our pilot race for live results.
 PILOT_RACE_ID = rsu.HOSPITAL_HILL_RACE_ID
@@ -378,6 +385,12 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
     api_secret = get_secret("RUNSIGNUP_API_SECRET")
     affiliate_token = get_secret("RUNSIGNUP_AFFILIATE_TOKEN")
 
+    # Registration is read through runsignup_results so both callers share one
+    # config. It is independent of api_key/api_secret: a call can be registered
+    # and still unauthenticated, which is exactly what this endpoint wants.
+    reg_token, reg_secret = rsu.api_registration()
+    reg_headers = {rsu.API_REG_SECRET_HEADER: reg_secret} if reg_secret else None
+
     start_date = date.today()
     end_date = start_date + timedelta(days=365)
     rows = []
@@ -397,10 +410,19 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
             params["api_key"] = api_key
             params["api_secret"] = api_secret
 
+        # API caller registration. Unset == unchanged pre-2027 behaviour.
+        if reg_token:
+            params[rsu.API_REG_TOKEN_PARAM] = reg_token
+
         # FIX: this constant is now defined at the top of the file.
-        response = requests.get(RUNSIGNUP_API_URL, params=params, timeout=30)
+        response = requests.get(
+            RUNSIGNUP_API_URL, params=params, headers=reg_headers, timeout=30
+        )
 
         if response.status_code != 200:
+            # A bad registration token fails every call with HTTP 400, which
+            # otherwise reads like a RunSignUp outage. Name the real cause.
+            rsu.raise_for_bad_registration(response)
             raise RuntimeError(f"RunSignUp API error for {state_code}: {response.text[:2000]}")
 
         data = response.json()
