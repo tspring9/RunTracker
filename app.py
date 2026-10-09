@@ -5,6 +5,8 @@ import pandas as pd
 import plotly.express as px
 from datetime import date, timedelta
 
+import storage
+
 st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 
 # -------------------------------------------------
@@ -27,6 +29,26 @@ def get_secret(name: str, default: str = "") -> str:
     except Exception:
         pass
     return os.getenv(name, default)
+
+
+def resolve_user_id() -> str:
+    """Resolve the current user id -- the seam where real auth will slot in.
+
+    There is no login system yet (multi-user auth is a separate project). Order:
+    an explicit RUNTRACKER_USER_ID secret/env var, then a `?user=` query param,
+    then a single-tenant default. Everyone with no override shares "default"'s
+    data, same as today, but it is no longer hard-coded SAMPLE_DATA -- it is
+    whatever that user has saved. When real auth lands, replace this function's
+    body with the authenticated user's id; storage.py never needs to change
+    since every call already takes user_id as a parameter.
+    """
+    secret_user_id = get_secret("RUNTRACKER_USER_ID")
+    if secret_user_id:
+        return secret_user_id
+    query_user_id = st.query_params.get("user")
+    if query_user_id:
+        return query_user_id
+    return "default"
 
 
 # -------------------------------------------------
@@ -79,6 +101,11 @@ ALL_STATES = [
 ]
 
 REQUIRED_COLUMNS = ["state", "state_name", "runner_name", "race_type", "race_name", "race_date", "finish_time", "city", "notes", "status"]
+# Carried alongside REQUIRED_COLUMNS so edit/delete can address a specific
+# stored row and API-imported rows stay distinguishable from manual ones.
+# Not part of REQUIRED_COLUMNS: they are DB bookkeeping, not fields the CSV
+# template/upload validation should require.
+PASSTHROUGH_COLUMNS = ["id", "source"]
 VALID_RACE_TYPES = ["5K", "10K", "10 Mile", "Half Marathon"]
 VALID_STATUSES = ["Completed", "Registered", "Interested", "Available for Signup", "Blank"]
 USER_ENTRY_STATUSES = ["Completed", "Registered", "Interested", "Blank"]
@@ -97,10 +124,6 @@ def build_template_df():
     return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
 
-def build_sample_df():
-    return normalize_source_df(pd.DataFrame(SAMPLE_DATA))
-
-
 def normalize_status(value):
     if pd.isna(value) or str(value).strip() == "":
         return "Blank"
@@ -115,7 +138,12 @@ def normalize_source_df(df: pd.DataFrame) -> pd.DataFrame:
     for col in REQUIRED_COLUMNS:
         if col not in df.columns:
             df[col] = "Blank" if col == "status" else ""
-    df = df[REQUIRED_COLUMNS].dropna(how="all").copy()
+    for col in PASSTHROUGH_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[REQUIRED_COLUMNS + PASSTHROUGH_COLUMNS].dropna(subset=REQUIRED_COLUMNS, how="all").copy()
+    df["id"] = df["id"].fillna("").astype(str).str.strip()
+    df["source"] = df["source"].fillna("").astype(str).str.strip()
     df["state"] = df["state"].fillna("").astype(str).str.strip().str.upper()
     df["state_name"] = df["state"].map(STATE_NAME_LOOKUP).fillna(df["state_name"])
     df["runner_name"] = df["runner_name"].fillna("").astype(str).str.strip()
@@ -256,19 +284,23 @@ def best_time_for_group(group: pd.DataFrame) -> str:
     return f"{row['runner_name']} - {row['finish_time']} ({row['race_type']})"
 
 
-def add_race_entry(entry: dict):
-    new_row = pd.DataFrame([entry])
-    st.session_state.source_data = normalize_source_df(pd.concat([st.session_state.source_data, new_row], ignore_index=True))
+def refresh_source_data_from_storage():
+    st.session_state.source_data = normalize_source_df(pd.DataFrame(storage.load_races(USER_ID)))
 
 
-def update_race_entry(index: int, entry: dict):
-    for col, value in entry.items():
-        st.session_state.source_data.at[index, col] = value
-    st.session_state.source_data = normalize_source_df(st.session_state.source_data)
+def add_race_entry(entry: dict, source: str = storage.SOURCE_MANUAL):
+    storage.save_race(USER_ID, {**entry, "source": source})
+    refresh_source_data_from_storage()
 
 
-def delete_race_entry(index: int):
-    st.session_state.source_data = st.session_state.source_data.drop(index=index).reset_index(drop=True)
+def update_race_entry(race_id: str, entry: dict):
+    storage.update_race(USER_ID, race_id, entry)
+    refresh_source_data_from_storage()
+
+
+def delete_race_entry(race_id: str):
+    storage.delete_race(USER_ID, race_id)
+    refresh_source_data_from_storage()
 
 
 def display_race_table(df: pd.DataFrame):
@@ -385,15 +417,54 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
 
 
 # -------------------------------------------------
-# Session-backed source data
+# Persistent, per-user source data
 # -------------------------------------------------
+# USER_ID is single-tenant for now -- see resolve_user_id() for the auth seam.
+USER_ID = resolve_user_id()
+
 if "source_data" not in st.session_state:
-    st.session_state.source_data = build_sample_df()
+    stored_rows = storage.load_races(USER_ID)
+    if stored_rows:
+        st.session_state.source_data = normalize_source_df(pd.DataFrame(stored_rows))
+        st.session_state.needs_onboarding = False
+    else:
+        st.session_state.source_data = build_template_df()
+        # Only prompt once per user: if they are "onboarded" but currently have
+        # zero races (e.g. they started empty, or deleted everything), do not
+        # nag them with the sample-data prompt again on every refresh.
+        st.session_state.needs_onboarding = not storage.is_onboarded(USER_ID)
 else:
     st.session_state.source_data = normalize_source_df(st.session_state.source_data)
 
 if "runsignup_future_races" not in st.session_state:
     st.session_state.runsignup_future_races = normalize_source_df(pd.DataFrame(columns=REQUIRED_COLUMNS))
+
+
+# -------------------------------------------------
+# First-load onboarding: never silently inject sample data
+# -------------------------------------------------
+if st.session_state.get("needs_onboarding"):
+    st.title("50 States Race Tracker")
+    st.subheader("Welcome! No saved races yet for this account.")
+    st.caption(
+        "Your race data is now stored persistently (it will survive a page refresh), "
+        "so let's start it off on the right foot: load the Tom / Rachel / Olivia demo "
+        "dataset to explore the app, or start with an empty race list."
+    )
+    onboard_col1, onboard_col2 = st.columns(2)
+    with onboard_col1:
+        if st.button("Load Demo Data", type="primary"):
+            storage.save_race(USER_ID, [dict(row, source=storage.SOURCE_SAMPLE) for row in SAMPLE_DATA])
+            storage.mark_onboarded(USER_ID)
+            refresh_source_data_from_storage()
+            st.session_state.needs_onboarding = False
+            st.rerun()
+    with onboard_col2:
+        if st.button("Start Empty"):
+            storage.mark_onboarded(USER_ID)
+            st.session_state.needs_onboarding = False
+            st.rerun()
+    st.stop()
 
 
 # -------------------------------------------------
@@ -685,8 +756,11 @@ with manage_page:
         else:
             st.success("CSV looks valid.")
             if st.button("Replace Current Data With Uploaded CSV"):
-                st.session_state.source_data = normalize_source_df(uploaded_df)
-                st.success("Current session data replaced successfully.")
+                normalized_upload = normalize_source_df(uploaded_df)
+                storage.replace_all_races(USER_ID, normalized_upload.to_dict("records"), source=storage.SOURCE_CSV)
+                storage.mark_onboarded(USER_ID)
+                refresh_source_data_from_storage()
+                st.success("Stored data replaced successfully.")
                 st.rerun()
 
     st.divider()
@@ -753,7 +827,8 @@ with manage_page:
                             "city": copy_city,
                             "notes": copy_notes,
                             "status": copy_status,
-                        }
+                        },
+                        source=storage.SOURCE_API,
                     )
                     st.success("API race copied into your personal race list.")
                     st.rerun()
@@ -871,7 +946,7 @@ with manage_page:
 
                     state_code = STATE_CODE_LOOKUP[edit_state_name]
                     update_race_entry(
-                        selected_index,
+                        selected_row["id"],
                         {
                             "state": state_code,
                             "state_name": edit_state_name,
@@ -889,9 +964,9 @@ with manage_page:
                     st.rerun()
 
         if st.button("Delete Selected Entry", type="secondary"):
-            delete_race_entry(selected_index)
+            delete_race_entry(selected_row["id"])
             st.success("Race deleted.")
             st.rerun()
 
     st.markdown("---")
-    st.caption("Next upgrade ideas: SQLite backend, scheduled RunSignUp refresh, Excel import, household/user accounts, medals/badges, public profiles, and monetized premium plans.")
+    st.caption("Next upgrade ideas: real user accounts/auth (see resolve_user_id), scheduled RunSignUp refresh, Excel import, medals/badges, public profiles, and monetized premium plans.")
