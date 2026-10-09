@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 import runsignup_results as rsu
 import storage
+import discovery_experiment as discovery
 
 st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 
@@ -600,8 +601,8 @@ col3.metric("States Interested", int((filtered_map_df["map_status"] == "Interest
 col4.metric("States Available", int((filtered_map_df["map_status"] == "Available for Signup").sum()))
 col5.metric("Total Entries", len(filtered_race_df))
 
-map_page, graphs_page, results_page, manage_page = st.tabs(
-    ["🗺️ Map", "📊 Graphs", "🏁 Find My Results", "🛠️ Data Management"]
+map_page, graphs_page, results_page, discovery_page, manage_page = st.tabs(
+    ["🗺️ Map", "📊 Graphs", "🏁 Find My Results", "Discovery Review", "🛠️ Data Management"]
 )
 
 
@@ -1034,7 +1035,55 @@ with results_page:
 
 
 # -------------------------------------------------
-# Page 4: Data management, add, edit, delete
+# Page 4: Bounded discovery experiment review
+# -------------------------------------------------
+with discovery_page:
+    summary = discovery.EXPERIMENT_SUMMARY
+    st.subheader("Bounded RunSignUp Discovery Review")
+    st.caption(
+        "An anonymized, read-only view of the two-runner experiment. These candidates are not "
+        "imported into the tracker and names are intentionally omitted."
+    )
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Eligible source rows", f"{summary['eligible_rows']:,}")
+    d2.metric("Sampled runners", len(discovery.RUNNERS))
+    d3.metric("High-confidence candidates", sum(row["High confidence"] for row in discovery.RUNNERS))
+    d4.metric("External requests", summary["external_requests"])
+
+    st.markdown("#### Sample and bounds")
+    st.write(
+        f"Source: **{summary['source_race']}** on {summary['source_date']}. "
+        f"Five-year lookback from {summary['lookback_floor']}; at most "
+        f"{summary['candidate_cap_per_runner']} candidate races per runner and "
+        f"{summary['race_day_cap']} race days per result-set discovery."
+    )
+    st.caption("Reproducible sampling seed")
+    st.code(summary["sample_seed"], language=None)
+    st.dataframe(pd.DataFrame(discovery.RUNNERS), width="stretch", hide_index=True)
+
+    st.markdown("#### Candidate evidence")
+    st.dataframe(
+        pd.DataFrame(discovery.CANDIDATE_RESULTS), width="stretch", hide_index=True,
+        column_config={"Public URL": st.column_config.LinkColumn("RunSignUp evidence", display_text="Open public result")},
+    )
+    st.info(
+        "An exact name is discovery evidence, not identity proof. High confidence requires the exact "
+        "case-insensitive full name plus at least two corroborators. Conflicting/name-only rows are rejected."
+    )
+
+    with st.expander("Request accounting and experiment limitations"):
+        st.dataframe(pd.DataFrame(discovery.REQUEST_COUNTS), width="stretch", hide_index=True)
+        st.markdown(
+            "- Public RunSignUp pages only; no credentials, contact data, or social enrichment.\n"
+            "- Search indexing and the five-race-day cap can miss valid history.\n"
+            "- Zero confident matches are a valid outcome.\n"
+            "- Candidate history should require user review and must never auto-import."
+        )
+
+
+# -------------------------------------------------
+# Page 5: Data management, add, edit, delete
 # -------------------------------------------------
 with manage_page:
     st.subheader("Data Management")
