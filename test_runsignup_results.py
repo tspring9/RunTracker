@@ -91,5 +91,111 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(mock_sets.call_count, 8)
 
 
+class ResultSetCatalogTests(unittest.TestCase):
+    @patch("runsignup_results._get")
+    def test_maps_individual_result_set_id_to_result_set_id(self, mock_get):
+        mock_get.return_value = {
+            "result_sets": [
+                {
+                    "individual_result_set_id": 10,
+                    "race_id": 2017,
+                    "event_id": 4002,
+                    "race_name": "No Frills, Just Thrills",
+                    "individual_result_set_name": "results",
+                    "last_modified_ts": 0,
+                }
+            ]
+        }
+
+        rows = rsu.fetch_result_set_catalog(page=1, results_per_page=5000)
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "race_id": 2017,
+                    "event_id": 4002,
+                    "result_set_id": 10,
+                    "race_name": "No Frills, Just Thrills",
+                    "last_modified_ts": 0,
+                }
+            ],
+        )
+        path, params = mock_get.call_args[0][0], mock_get.call_args[1]
+        self.assertEqual(path, rsu.RESULT_SET_CATALOG_HOST_PATH)
+        self.assertEqual(params["num_per_page"], 5000)
+        self.assertNotIn("modified_since_timestamp", params)
+
+    @patch("runsignup_results._get")
+    def test_empty_page_is_the_paging_terminator(self, mock_get):
+        mock_get.return_value = {"result_sets": []}
+        self.assertEqual(rsu.fetch_result_set_catalog(page=99), [])
+
+    @patch("runsignup_results._get")
+    def test_modified_since_timestamp_is_forwarded_when_given(self, mock_get):
+        mock_get.return_value = {"result_sets": []}
+        rsu.fetch_result_set_catalog(modified_since_timestamp=1523774999)
+        self.assertEqual(mock_get.call_args[1]["modified_since_timestamp"], 1523774999)
+
+
+class SearchRacesByStateRangeTests(unittest.TestCase):
+    @patch("runsignup_results._get")
+    def test_shapes_race_rows_with_event_dates(self, mock_get):
+        mock_get.return_value = {
+            "races": [
+                {
+                    "race": {
+                        "race_id": 197893,
+                        "name": "10K BRIN series training",
+                        "address": {"city": "Lincoln", "state": "ne"},
+                        "url": "https://runsignup.com/Race/NE/Lincoln/10K",
+                        "events": [{"start_time": "1/11/2026 08:00"}],
+                    }
+                }
+            ]
+        }
+
+        races = rsu.search_races_by_state_range("ne", "2026-01-01", "2026-12-31")
+
+        self.assertEqual(
+            races,
+            [
+                {
+                    "race_id": 197893,
+                    "name": "10K BRIN series training",
+                    "city": "Lincoln",
+                    "state": "NE",
+                    "url": "https://runsignup.com/Race/NE/Lincoln/10K",
+                    "event_dates": ["2026-01-11"],
+                }
+            ],
+        )
+        _, params = mock_get.call_args
+        self.assertEqual(params["state"], "NE")
+        self.assertEqual(params["events"], "T")
+        self.assertEqual(params["start_date"], "2026-01-01")
+        self.assertEqual(params["end_date"], "2026-12-31")
+
+
+class EventHasResultsTests(unittest.TestCase):
+    @patch("runsignup_results._get")
+    def test_true_when_api_reports_results(self, mock_get):
+        mock_get.return_value = {"has_results": "T"}
+        self.assertTrue(rsu.event_has_results(2017, 4002))
+        path = mock_get.call_args[0][0]
+        self.assertEqual(path, "/race/2017/results/has-result-sets")
+        self.assertEqual(mock_get.call_args[1]["event_id"], 4002)
+
+    @patch("runsignup_results._get")
+    def test_false_when_api_reports_no_results(self, mock_get):
+        mock_get.return_value = {"has_results": "F"}
+        self.assertFalse(rsu.event_has_results(2017, 4002))
+
+    @patch("runsignup_results._get")
+    def test_never_raises_on_api_error(self, mock_get):
+        mock_get.side_effect = rsu.RunSignUpError("Event not found.")
+        self.assertFalse(rsu.event_has_results(2017, 999999999))
+
+
 if __name__ == "__main__":
     unittest.main()
