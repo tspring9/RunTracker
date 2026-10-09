@@ -5,6 +5,8 @@ import pandas as pd
 import plotly.express as px
 from datetime import date, timedelta
 
+import runsignup_results as rsu
+
 st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 
 # -------------------------------------------------
@@ -17,6 +19,13 @@ API_URL = RUNSIGNUP_API_URL  # optional alias, kept for consistency with the pro
 # Credentials live in .streamlit/secrets.toml locally and in the Streamlit Cloud
 # secrets manager when deployed. They are read via get_secret() below -- never
 # hard-code them here, since this repo is public.
+#
+# NOTE: the public *results* endpoints need no credentials at all. See
+# runsignup_results.py. Only the race-search endpoint below benefits from a key.
+
+# Hospital Hill Run is our pilot race for live results.
+PILOT_RACE_ID = rsu.HOSPITAL_HILL_RACE_ID
+PILOT_RACE_LABEL = "Hospital Hill Run (Kansas City, MO)"
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -315,13 +324,27 @@ def detect_race_type_from_events(events) -> str:
     return "Half Marathon"
 
 
+def next_event_date_in_window(events, start_date: date, end_date: date) -> str:
+    """Earliest event date inside [start_date, end_date], as YYYY-MM-DD, else ""."""
+    candidates = []
+    for event in events or []:
+        event = event.get("event", event)
+        parsed = rsu.parse_event_date(event.get("start_time"))
+        if not parsed:
+            continue
+        if start_date.isoformat() <= parsed <= end_date.isoformat():
+            candidates.append(parsed)
+    return min(candidates) if candidates else ""
+
+
 def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
     """Pull 12 months of future RunSignUp races for one state and shape them like RunTracker rows."""
+    # Credentials are optional here -- /rest/races answers unauthenticated. We
+    # still send them when present, since an affiliate key is what earns the
+    # registration commission and may lift rate limits.
     api_key = get_secret("RUNSIGNUP_API_KEY")
     api_secret = get_secret("RUNSIGNUP_API_SECRET")
-
-    if not api_key or not api_secret:
-        raise RuntimeError("Missing RunSignUp credentials. Add RUNSIGNUP_API_KEY and RUNSIGNUP_API_SECRET to Streamlit secrets.")
+    affiliate_token = get_secret("RUNSIGNUP_AFFILIATE_TOKEN")
 
     start_date = date.today()
     end_date = start_date + timedelta(days=365)
@@ -330,8 +353,6 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
     for page in range(1, 6):
         params = {
             "format": "json",
-            "api_key": api_key,
-            "api_secret": api_secret,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "state": state_code,
@@ -340,6 +361,9 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
             "results_per_page": 1000,
             "sort": "date ASC",
         }
+        if api_key and api_secret:
+            params["api_key"] = api_key
+            params["api_secret"] = api_secret
 
         # FIX: this constant is now defined at the top of the file.
         response = requests.get(RUNSIGNUP_API_URL, params=params, timeout=30)
@@ -358,6 +382,14 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
             events = race.get("events") or []
             race_url = race.get("url") or race.get("external_race_url") or ""
 
+            # next_date is unreliable -- it comes back null or stale on series and
+            # membership listings, which is why this overlay used to show blank and
+            # past-dated rows. Prefer the first event that actually falls in our
+            # window, and skip the listing entirely if none does.
+            race_date = next_event_date_in_window(events, start_date, end_date)
+            if not race_date:
+                continue
+
             rows.append(
                 {
                     "state": state_code,
@@ -365,10 +397,10 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
                     "runner_name": "Future Races",
                     "race_type": detect_race_type_from_events(events),
                     "race_name": race.get("name", ""),
-                    "race_date": race.get("next_date", ""),
+                    "race_date": race_date,
                     "finish_time": "",
                     "city": address.get("city", ""),
-                    "notes": race_url,
+                    "notes": rsu.affiliate_race_url(race_url, affiliate_token),
                     "status": "Available for Signup",
                 }
             )
@@ -382,6 +414,43 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
     df = normalize_source_df(pd.DataFrame(rows))
     df = df.drop_duplicates(subset=["state", "race_name", "race_date", "city"], keep="first")
     return df
+
+
+# -------------------------------------------------
+# Live results (RunSignUp) -- cached, since discovery is one call per event
+# -------------------------------------------------
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def cached_race_search(name: str, state: str, include_past: bool):
+    return rsu.search_races(name, state=state or None, include_past=include_past)
+
+
+@st.cache_data(ttl=60 * 15, show_spinner=False)
+def cached_result_sets(race_id: int, since_date: str, include_virtual: bool, include_older_years: bool = False):
+    """Public result sets; short TTL is safe for preliminary race-day data."""
+    return rsu.discover_result_sets(
+        race_id,
+        include_virtual=include_virtual,
+        since_date=since_date,
+        max_event_days=None if include_older_years else rsu.DEFAULT_DISCOVERY_EVENT_DAYS,
+    )
+
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def cached_runner_results(
+    race_id: int,
+    first_name: str,
+    last_name: str,
+    since_date: str,
+    include_virtual: bool,
+    include_older_years: bool = False,
+):
+    sets = cached_result_sets(race_id, since_date, include_virtual, include_older_years)
+    return rsu.find_runner_results(
+        race_id,
+        first_name=first_name,
+        last_name=last_name,
+        result_sets=sets,
+    )
 
 
 # -------------------------------------------------
@@ -461,7 +530,9 @@ col3.metric("States Interested", int((filtered_map_df["map_status"] == "Interest
 col4.metric("States Available", int((filtered_map_df["map_status"] == "Available for Signup").sum()))
 col5.metric("Total Entries", len(filtered_race_df))
 
-map_page, graphs_page, manage_page = st.tabs(["🗺️ Map", "📊 Graphs", "🛠️ Data Management"])
+map_page, graphs_page, results_page, manage_page = st.tabs(
+    ["🗺️ Map", "📊 Graphs", "🏁 Find My Results", "🛠️ Data Management"]
+)
 
 
 # -------------------------------------------------
@@ -650,7 +721,248 @@ with graphs_page:
 
 
 # -------------------------------------------------
-# Page 3: Data management, add, edit, delete
+# Page 3: Live results lookup from RunSignUp
+# -------------------------------------------------
+with results_page:
+    st.subheader("Find My Results")
+    st.caption(
+        "Pulls real finisher results straight from RunSignUp. Public result sets need no API key, "
+        "so this works without any credentials configured."
+    )
+
+    with st.expander("Find a race by name", expanded=False):
+        search_col, state_col = st.columns([3, 1])
+        with search_col:
+            race_search_name = st.text_input("Race name", placeholder="Lincoln Half Marathon")
+        with state_col:
+            race_search_state = st.text_input("State", max_chars=2, placeholder="NE")
+        race_search_include_past = st.checkbox("Include past race listings", value=True)
+        if st.button("Search Races"):
+            if not race_search_name.strip():
+                st.error("Enter a race name to search.")
+            else:
+                try:
+                    st.session_state.race_search_results = cached_race_search(
+                        race_search_name.strip(), race_search_state.strip().upper(), race_search_include_past
+                    )
+                    st.session_state.race_search_error = ""
+                except Exception as exc:
+                    st.session_state.race_search_results = []
+                    st.session_state.race_search_error = str(exc)
+
+        if st.session_state.get("race_search_error"):
+            st.error("RunSignUp race search failed.")
+            st.code(st.session_state.race_search_error)
+
+        race_matches = st.session_state.get("race_search_results") or []
+        selected_race_id = None
+        if race_matches:
+            race_labels = [
+                f"{race['name']} — {race['city']}, {race['state']} — {race['next_date'] or 'date unavailable'} "
+                f"(ID {race['race_id']})"
+                for race in race_matches
+            ]
+            selected_label = st.selectbox("Matching race", race_labels)
+            selected_race_id = race_matches[race_labels.index(selected_label)]["race_id"]
+            st.link_button("Open on RunSignUp", race_matches[race_labels.index(selected_label)]["url"])
+        elif "race_search_results" in st.session_state and not st.session_state.get("race_search_error"):
+            st.info("No matching races found.")
+
+    r1, r2, r3 = st.columns([2, 2, 2])
+    with r1:
+        lookup_first_name = st.text_input("First Name", key="lookup_first_name", placeholder="Thomas")
+    with r2:
+        lookup_last_name = st.text_input("Last Name", key="lookup_last_name", placeholder="Springhower")
+    with r3:
+        if selected_race_id:
+            lookup_race_id = int(selected_race_id)
+            st.metric("Selected RunSignUp Race ID", lookup_race_id)
+        else:
+            lookup_race_id = st.number_input(
+                "RunSignUp Race ID",
+                min_value=1,
+                value=PILOT_RACE_ID,
+                step=1,
+                help=f"Defaults to {PILOT_RACE_LABEL}. Race ID is the number in the RunSignUp race URL.",
+            )
+
+    o1, o2, o3 = st.columns(3)
+    with o1:
+        lookup_since_year = st.number_input(
+            "Only races since (year)", min_value=2010, max_value=date.today().year, value=2024, step=1,
+            help="Discovery costs one API call per event, so narrowing the years keeps the lookup fast.",
+        )
+    with o2:
+        lookup_include_virtual = st.checkbox("Include virtual events", value=False)
+    with o3:
+        lookup_include_older = st.checkbox(
+            "Include older years",
+            value=False,
+            help=f"Off scans only the {rsu.DEFAULT_DISCOVERY_EVENT_DAYS} most recent race days.",
+        )
+
+    if st.button("Search RunSignUp Results", type="primary"):
+        if not lookup_first_name.strip() and not lookup_last_name.strip():
+            st.error("Enter a first name, a last name, or both.")
+        else:
+            with st.spinner("Searching RunSignUp result sets..."):
+                try:
+                    st.session_state.results_lookup = cached_runner_results(
+                        int(lookup_race_id),
+                        lookup_first_name.strip(),
+                        lookup_last_name.strip(),
+                        f"{int(lookup_since_year)}-01-01",
+                        lookup_include_virtual,
+                        lookup_include_older,
+                    )
+                    st.session_state.results_lookup_error = ""
+                except Exception as exc:
+                    st.session_state.results_lookup = []
+                    st.session_state.results_lookup_error = str(exc)
+
+    if st.session_state.get("results_lookup_error"):
+        st.error("RunSignUp results lookup failed.")
+        st.code(st.session_state.results_lookup_error)
+
+    found_rows = st.session_state.get("results_lookup")
+    if found_rows is not None and not st.session_state.get("results_lookup_error"):
+        if not found_rows:
+            st.warning(
+                "No matching results found. Check the spelling, widen the year range, or confirm the runner "
+                "finished this race. RunSignUp matches on the name used at registration."
+            )
+        else:
+            st.success(f"Found {len(found_rows)} result(s).")
+
+            found_display = pd.DataFrame(
+                [
+                    {
+                        "Date": row["race_date"],
+                        "Race": row["race_name"],
+                        "Race Type": row["race_type"],
+                        "Runner": row["runner_name"],
+                        "Finish Time": row["finish_time"],
+                        "Place": row["_raw"].get("place", ""),
+                        "Age": row["_raw"].get("age", ""),
+                        "Pace": row["_raw"].get("pace", ""),
+                        "Hometown": ", ".join(
+                            part for part in [row["_raw"].get("city", ""), row["_raw"].get("state", "")] if part
+                        ),
+                    }
+                    for row in found_rows
+                ]
+            )
+            st.dataframe(found_display, width='stretch', hide_index=True)
+
+            import_labels = [
+                f"{idx}: {row['race_date']} | {row['race_type']} | {row['race_name']} | {row['finish_time']}"
+                for idx, row in enumerate(found_rows)
+            ]
+            chosen_imports = st.multiselect(
+                "Select results to add to your race list",
+                import_labels,
+                default=import_labels,
+                key="results_import_select",
+            )
+
+            if st.button("Add Selected Results to My Race List"):
+                added = 0
+                for label in chosen_imports:
+                    row = dict(found_rows[int(label.split(":", 1)[0])])
+                    row.pop("_raw", None)
+                    if not row.get("race_type"):
+                        row["race_type"] = "Half Marathon"
+                    add_race_entry(row)
+                    added += 1
+                st.success(f"Added {added} real result(s) from RunSignUp. These replace hand-entered finish times.")
+                st.rerun()
+
+    st.divider()
+    st.subheader("Browse a Full Leaderboard")
+    st.caption("Useful for sanity-checking a result set, and the basis for future head-to-head comparisons.")
+
+    # Streamlit executes every tab on every rerun, so this discovery call has to
+    # stay behind an explicit button -- otherwise each page load fires a burst of
+    # RunSignUp requests for visitors who never open this tab.
+    if st.button("List Available Result Sets"):
+        with st.spinner("Discovering public result sets..."):
+            try:
+                st.session_state.available_sets = cached_result_sets(
+                    int(lookup_race_id),
+                    f"{int(lookup_since_year)}-01-01",
+                    lookup_include_virtual,
+                    lookup_include_older,
+                )
+                st.session_state.available_sets_error = ""
+            except Exception as exc:
+                st.session_state.available_sets = []
+                st.session_state.available_sets_error = str(exc)
+
+    if st.session_state.get("available_sets_error"):
+        st.error("Could not list result sets for this race.")
+        st.code(st.session_state.available_sets_error)
+
+    available_sets = st.session_state.get("available_sets")
+    if available_sets is None:
+        st.info("Click **List Available Result Sets** to see which years and distances have published results.")
+    elif not available_sets:
+        st.info("No public result sets found for this race in the selected year range.")
+    else:
+        set_labels = [
+            f"{idx}: {entry['date']} | {entry['race_type'] or entry['name']} | set {entry['result_set_id']}"
+            for idx, entry in enumerate(available_sets)
+        ]
+        chosen_set_label = st.selectbox("Result set", set_labels, key="leaderboard_set_select")
+        chosen_set = available_sets[int(chosen_set_label.split(":", 1)[0])]
+        leaderboard_size = st.slider("Rows to show", min_value=10, max_value=200, value=25, step=5)
+
+        if st.button("Load Leaderboard"):
+            with st.spinner("Loading results..."):
+                try:
+                    leaderboard = rsu.fetch_results(
+                        chosen_set["race_id"],
+                        chosen_set["event_id"],
+                        chosen_set["result_set_id"],
+                        results_per_page=int(leaderboard_size),
+                        max_pages=1,
+                    )
+                    st.session_state.leaderboard_rows = leaderboard
+                    st.session_state.leaderboard_label = (
+                        f"{chosen_set['race_name']} - {chosen_set['name']} ({chosen_set['date']})"
+                    )
+                except Exception as exc:
+                    st.session_state.leaderboard_rows = []
+                    st.error("Leaderboard load failed.")
+                    st.code(str(exc))
+
+        if st.session_state.get("leaderboard_rows"):
+            st.markdown(f"**{st.session_state.get('leaderboard_label', '')}**")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Place": row.get("place", ""),
+                            "Bib": row.get("bib", ""),
+                            "Name": f"{row.get('first_name', '')} {row.get('last_name', '')}".strip(),
+                            "Gender": row.get("gender", ""),
+                            "Age": row.get("age", ""),
+                            "Hometown": ", ".join(
+                                part for part in [row.get("city", ""), row.get("state", "")] if part
+                            ),
+                            "Chip Time": row.get("chip_time", ""),
+                            "Clock Time": row.get("clock_time", ""),
+                            "Pace": row.get("pace", ""),
+                        }
+                        for row in st.session_state.leaderboard_rows
+                    ]
+                ),
+                width='stretch',
+                hide_index=True,
+            )
+
+
+# -------------------------------------------------
+# Page 4: Data management, add, edit, delete
 # -------------------------------------------------
 with manage_page:
     st.subheader("Data Management")
