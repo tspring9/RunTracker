@@ -3,8 +3,10 @@ import requests
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
+import results_search
+import runner_matching
 import runsignup_results as rsu
 import storage
 import discovery_experiment as discovery
@@ -28,6 +30,12 @@ API_URL = RUNSIGNUP_API_URL  # optional alias, kept for consistency with the pro
 # Hospital Hill Run is our pilot race for live results.
 PILOT_RACE_ID = rsu.HOSPITAL_HILL_RACE_ID
 PILOT_RACE_LABEL = "Hospital Hill Run (Kansas City, MO)"
+PILOT_STATE = "MO"
+
+# Board-approved defaults for the Sign Up tab's capped name sweep (SPR-15).
+SIGNUP_DEFAULT_LOOKBACK_YEARS = 5
+SIGNUP_DEFAULT_MAX_CALLS = 400
+SIGNUP_MIN_DOB = date(1920, 1, 1)
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -486,6 +494,91 @@ def cached_runner_results(
 
 
 # -------------------------------------------------
+# Name-first Sign Up search (SPR-15/18) -- capped sweep orchestration
+# -------------------------------------------------
+# PRIVACY: these two functions are the actual cache-key boundary DOB/email
+# must never cross. Streamlit cache keys are inspectable, so age
+# classification happens in the Sign Up tab, AFTER these calls return, on
+# the rows they hand back -- never pass dob/email into either of these.
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def cached_candidate_result_sets(states: tuple, start_year: int, end_year: int, max_calls: int, _progress_cb=None):
+    scope = results_search.SearchScope(states=tuple(states), start_year=start_year, end_year=end_year, max_calls=max_calls)
+    return results_search.candidate_result_sets(scope, progress_cb=_progress_cb)
+
+
+@st.cache_data(ttl=60 * 30, show_spinner=False)
+def cached_sweep_for_runner(
+    first_name: str,
+    last_name: str,
+    states: tuple,
+    start_year: int,
+    end_year: int,
+    max_calls: int,
+    resume_cursor: str,
+    _progress_cb=None,
+):
+    scope = results_search.SearchScope(states=tuple(states), start_year=start_year, end_year=end_year, max_calls=max_calls)
+    candidates = cached_candidate_result_sets(states, start_year, end_year, max_calls, _progress_cb=_progress_cb)
+    return results_search.sweep_for_runner(
+        first_name, last_name, candidates, scope, progress_cb=_progress_cb, resume_cursor=resume_cursor
+    )
+
+
+def describe_signup_scope(states, start_year: int, end_year: int, max_calls: int) -> str:
+    state_text = ", ".join(sorted(states)) if states else "no states"
+    return f"Will search {state_text} for {start_year}–{end_year}, up to {max_calls} API calls."
+
+
+def render_signup_progress(progress, bar, caption) -> None:
+    stage_labels = {
+        "races": "Finding races in scope",
+        "catalog": "Checking which races have published results",
+        "sweep": "Searching results for your name",
+        "capped": "Paused at the call cap",
+        "done": "Done",
+    }
+    budget = max(progress.calls_budget, 1)
+    fraction = min(1.0, progress.calls_used / budget)
+    label = stage_labels.get(progress.stage, progress.stage)
+    bar.progress(
+        fraction,
+        text=f"{label} — {progress.candidates_checked}/{max(progress.candidates_total, 1)} candidates checked",
+    )
+    caption.caption(f"API calls this step: {progress.calls_used} / {progress.calls_budget}")
+
+
+def classify_signup_matches(matches: list, dob: date) -> list:
+    """Age classification happens here, after the cache boundary above, on
+    rows that already left the cache. dob never travels any further than
+    this function and the session state it was read from.
+
+    results_search.py's candidates carry "event_date", but
+    rsu.result_to_tracker_row (reused by sweep_for_runner) reads
+    context.get("date", ""), so every row that comes out of the capped
+    sweep currently has an empty race_date. Backfilled here from
+    _context["event_date"] rather than touching the frozen SPR-17
+    contract; flagged on SPR-18 for the backend owner to fix at the source.
+    """
+    classified = []
+    for row in matches:
+        raw = row.get("_raw", {})
+        context = row.get("_context", {})
+        race_date_str = row.get("race_date") or context.get("event_date", "")
+        if not row.get("race_date") and race_date_str:
+            row = {**row, "race_date": race_date_str}
+        result_age = runner_matching.parse_result_age(raw.get("age"))
+        age_on_race_date = None
+        try:
+            race_date_obj = datetime.strptime(race_date_str, "%Y-%m-%d").date()
+            age_on_race_date = runner_matching.age_on_date(dob, race_date_obj)
+        except (ValueError, TypeError):
+            age_on_race_date = None
+        confidence, reason = runner_matching.classify_confidence(age_on_race_date, result_age)
+        classified.append({**row, "_confidence": confidence, "_reason": reason, "_result_age": result_age})
+    return classified
+
+
+# -------------------------------------------------
 # Persistent, per-user source data
 # -------------------------------------------------
 # USER_ID is single-tenant for now -- see resolve_user_id() for the auth seam.
@@ -601,8 +694,8 @@ col3.metric("States Interested", int((filtered_map_df["map_status"] == "Interest
 col4.metric("States Available", int((filtered_map_df["map_status"] == "Available for Signup").sum()))
 col5.metric("Total Entries", len(filtered_race_df))
 
-map_page, graphs_page, results_page, discovery_page, manage_page = st.tabs(
-    ["🗺️ Map", "📊 Graphs", "🏁 Find My Results", "Discovery Review", "🛠️ Data Management"]
+map_page, graphs_page, signup_page, discovery_page, manage_page = st.tabs(
+    ["\U0001f5fa️ Map", "\U0001f4ca Graphs", "Sign Up", "Discovery Review", "\U0001f6e0️ Data Management"]
 )
 
 
@@ -792,16 +885,224 @@ with graphs_page:
 
 
 # -------------------------------------------------
-# Page 3: Live results lookup from RunSignUp
+# Page 3: Name-first Sign Up results search (SPR-15/18)
 # -------------------------------------------------
-with results_page:
-    st.subheader("Find My Results")
+with signup_page:
+    st.subheader("Sign Up")
     st.caption(
-        "Pulls real finisher results straight from RunSignUp. Public result sets need no API key, "
-        "so this works without any credentials configured."
+        "Enter your name and date of birth to find your race history across RunSignUp, instead of "
+        "searching one race at a time."
     )
 
-    with st.expander("Find a race by name", expanded=False):
+    for key, default in (
+        ("signup_matches", []),
+        ("signup_resume_cursor", ""),
+        ("signup_capped", False),
+        ("signup_candidates_checked", 0),
+        ("signup_candidates_total", 0),
+        ("signup_confirmed_keys", set()),
+        ("signup_rejected_keys", set()),
+        ("signup_scope", None),
+        ("signup_error", ""),
+    ):
+        st.session_state.setdefault(key, default)
+
+    su1, su2, su3 = st.columns(3)
+    with su1:
+        signup_first_name = st.text_input("First name", key="signup_first_name")
+    with su2:
+        signup_last_name = st.text_input("Last name", key="signup_last_name")
+    with su3:
+        signup_dob = st.date_input(
+            "Date of birth",
+            value=None,
+            min_value=SIGNUP_MIN_DOB,
+            max_value=date.today(),
+            key="signup_dob_input",
+        )
+
+    signup_email = st.text_input(
+        "Email (optional)",
+        key="signup_email",
+        help=(
+            "Placeholder only -- this is never sent to RunSignUp, never stored, and never leaves "
+            "this browser session."
+        ),
+    )
+    signup_email_valid = True
+    if signup_email.strip():
+        signup_email_valid = runner_matching.valid_email(signup_email)
+        if not signup_email_valid:
+            st.caption(":red[That doesn't look like a valid email format.]")
+
+    tracker_states = sorted(
+        {s for s in st.session_state.source_data.get("state", pd.Series(dtype=str)).tolist() if s}
+    )
+    default_states = tracker_states or [PILOT_STATE]
+    current_year = date.today().year
+
+    with st.expander("Optional search hints", expanded=False):
+        signup_states = st.multiselect(
+            "States",
+            options=[code for code, _ in ALL_STATES],
+            default=default_states,
+            key="signup_states",
+        )
+        signup_year_range = st.slider(
+            "Years",
+            min_value=2010,
+            max_value=current_year,
+            value=(max(2010, current_year - (SIGNUP_DEFAULT_LOOKBACK_YEARS - 1)), current_year),
+            key="signup_year_range",
+        )
+
+    resolved_states = tuple(sorted(signup_states or default_states))
+    resolved_start_year, resolved_end_year = signup_year_range
+    st.info(describe_signup_scope(resolved_states, resolved_start_year, resolved_end_year, SIGNUP_DEFAULT_MAX_CALLS))
+
+    find_clicked = st.button("Find My Races", type="primary")
+
+    run_token = None
+    if find_clicked:
+        if not signup_first_name.strip() or not signup_last_name.strip() or signup_dob is None:
+            st.session_state.signup_error = "First name, last name, and date of birth are all required."
+        elif signup_email.strip() and not signup_email_valid:
+            st.session_state.signup_error = "Fix the email format (or clear it) before searching."
+        else:
+            st.session_state.signup_error = ""
+            st.session_state.signup_matches = []
+            st.session_state.signup_resume_cursor = ""
+            st.session_state.signup_capped = False
+            st.session_state.signup_candidates_checked = 0
+            st.session_state.signup_candidates_total = 0
+            st.session_state.signup_confirmed_keys = set()
+            st.session_state.signup_rejected_keys = set()
+            st.session_state.signup_scope = {
+                "states": resolved_states,
+                "start_year": resolved_start_year,
+                "end_year": resolved_end_year,
+                "max_calls": SIGNUP_DEFAULT_MAX_CALLS,
+            }
+            run_token = "search"
+
+    if st.session_state.signup_error:
+        st.error(st.session_state.signup_error)
+
+    if st.session_state.signup_capped and st.session_state.signup_scope:
+        st.warning(
+            f"Stopped at the {st.session_state.signup_scope['max_calls']}-call cap; "
+            f"{st.session_state.signup_candidates_checked} of {st.session_state.signup_candidates_total} "
+            "candidates checked."
+        )
+        if st.button("Continue searching"):
+            run_token = "continue"
+
+    if run_token and st.session_state.signup_scope:
+        scope = st.session_state.signup_scope
+        progress_bar = st.progress(0.0, text="Starting search...")
+        progress_caption = st.empty()
+
+        def _on_progress(progress, _bar=progress_bar, _caption=progress_caption):
+            render_signup_progress(progress, _bar, _caption)
+
+        try:
+            with st.spinner("Searching RunSignUp..."):
+                new_matches, sweep_progress = cached_sweep_for_runner(
+                    signup_first_name.strip(),
+                    signup_last_name.strip(),
+                    scope["states"],
+                    scope["start_year"],
+                    scope["end_year"],
+                    scope["max_calls"],
+                    st.session_state.signup_resume_cursor,
+                    _progress_cb=_on_progress,
+                )
+            st.session_state.signup_matches = st.session_state.signup_matches + new_matches
+            st.session_state.signup_resume_cursor = sweep_progress.cursor
+            st.session_state.signup_capped = sweep_progress.capped
+            st.session_state.signup_candidates_checked = sweep_progress.candidates_checked
+            st.session_state.signup_candidates_total = sweep_progress.candidates_total
+        except Exception as exc:
+            st.session_state.signup_error = f"Search failed: {exc}"
+            st.error(st.session_state.signup_error)
+
+    if st.session_state.signup_matches:
+        classified = classify_signup_matches(st.session_state.signup_matches, signup_dob)
+        high = [r for r in classified if r["_confidence"] == runner_matching.HIGH]
+        possible = [r for r in classified if r["_confidence"] == runner_matching.POSSIBLE]
+        rejected = [r for r in classified if r["_confidence"] == runner_matching.REJECTED]
+
+        affiliate_token = get_secret("RUNSIGNUP_AFFILIATE_TOKEN")
+
+        def _render_match_row(bucket_key: str, idx: int, row: dict, show_reason: bool):
+            raw = row.get("_raw", {})
+            context = row.get("_context", {})
+            race_url = rsu.affiliate_race_url(context.get("url", ""), affiliate_token)
+            key_base = (
+                f"{bucket_key}_{idx}_{context.get('race_id')}_{context.get('event_id')}_"
+                f"{context.get('result_set_id')}_{raw.get('bib', '')}"
+            )
+            already_confirmed = key_base in st.session_state.signup_confirmed_keys
+            already_rejected = key_base in st.session_state.signup_rejected_keys
+
+            c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
+            race_label = row.get("race_name", "")
+            if race_url:
+                c1.markdown(f"**[{race_label}]({race_url})**")
+            else:
+                c1.markdown(f"**{race_label}**")
+            c2.write(row.get("race_date", ""))
+            c3.write(row.get("race_type", "") or "Unknown type")
+            c4.write(row.get("finish_time", "") or "—")
+            age_display = row["_result_age"] if row["_result_age"] is not None else "—"
+            c5.write(f"Age: {age_display}")
+            if show_reason:
+                st.caption(row["_reason"])
+
+            if already_confirmed:
+                st.caption("Added to your race list.")
+            elif already_rejected:
+                st.caption("Marked as not you.")
+            else:
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("This is me", key=f"confirm_{key_base}"):
+                        clean_row = {k: v for k, v in row.items() if not k.startswith("_")}
+                        clean_row["state_name"] = STATE_NAME_LOOKUP.get(
+                            clean_row.get("state", ""), clean_row.get("state_name", "")
+                        )
+                        add_race_entry(clean_row, source=storage.SOURCE_API)
+                        st.session_state.signup_confirmed_keys.add(key_base)
+                        st.rerun()
+                with b2:
+                    if st.button("Not me", key=f"reject_{key_base}"):
+                        st.session_state.signup_rejected_keys.add(key_base)
+                        st.rerun()
+            st.divider()
+
+        st.markdown(f"#### High confidence ({len(high)})")
+        if not high:
+            st.caption("No high-confidence matches yet.")
+        for idx, row in enumerate(high):
+            _render_match_row("high", idx, row, show_reason=False)
+
+        st.markdown(f"#### Possible ({len(possible)})")
+        if not possible:
+            st.caption("No possible matches yet.")
+        for idx, row in enumerate(possible):
+            _render_match_row("possible", idx, row, show_reason=True)
+
+        with st.expander(f"Rejected ({len(rejected)})", expanded=False):
+            for idx, row in enumerate(rejected):
+                _render_match_row("rejected", idx, row, show_reason=True)
+    elif run_token:
+        st.info("No matching results found in this scope yet.")
+
+    with st.expander("Advanced: search one specific race", expanded=False):
+        st.caption(
+            "Pulls real finisher results straight from RunSignUp for a single race you already know, "
+            "instead of sweeping a whole state/year scope above. Public result sets need no API key."
+        )
         search_col, state_col = st.columns([3, 1])
         with search_col:
             race_search_name = st.text_input("Race name", placeholder="Lincoln Half Marathon")
@@ -841,197 +1142,197 @@ with results_page:
         elif "race_search_results" in st.session_state and not st.session_state.get("race_search_error"):
             st.info("No matching races found.")
 
-    r1, r2, r3 = st.columns([2, 2, 2])
-    with r1:
-        lookup_first_name = st.text_input("First Name", key="lookup_first_name", placeholder="Thomas")
-    with r2:
-        lookup_last_name = st.text_input("Last Name", key="lookup_last_name", placeholder="Springhower")
-    with r3:
-        if selected_race_id:
-            lookup_race_id = int(selected_race_id)
-            st.metric("Selected RunSignUp Race ID", lookup_race_id)
-        else:
-            lookup_race_id = st.number_input(
-                "RunSignUp Race ID",
-                min_value=1,
-                value=PILOT_RACE_ID,
-                step=1,
-                help=f"Defaults to {PILOT_RACE_LABEL}. Race ID is the number in the RunSignUp race URL.",
+        r1, r2, r3 = st.columns([2, 2, 2])
+        with r1:
+            lookup_first_name = st.text_input("First Name", key="lookup_first_name", placeholder="Thomas")
+        with r2:
+            lookup_last_name = st.text_input("Last Name", key="lookup_last_name", placeholder="Springhower")
+        with r3:
+            if selected_race_id:
+                lookup_race_id = int(selected_race_id)
+                st.metric("Selected RunSignUp Race ID", lookup_race_id)
+            else:
+                lookup_race_id = st.number_input(
+                    "RunSignUp Race ID",
+                    min_value=1,
+                    value=PILOT_RACE_ID,
+                    step=1,
+                    help=f"Defaults to {PILOT_RACE_LABEL}. Race ID is the number in the RunSignUp race URL.",
+                )
+
+        o1, o2, o3 = st.columns(3)
+        with o1:
+            lookup_since_year = st.number_input(
+                "Only races since (year)", min_value=2010, max_value=date.today().year, value=2024, step=1,
+                help="Discovery costs one API call per event, so narrowing the years keeps the lookup fast.",
+            )
+        with o2:
+            lookup_include_virtual = st.checkbox("Include virtual events", value=False)
+        with o3:
+            lookup_include_older = st.checkbox(
+                "Include older years",
+                value=False,
+                help=f"Off scans only the {rsu.DEFAULT_DISCOVERY_EVENT_DAYS} most recent race days.",
             )
 
-    o1, o2, o3 = st.columns(3)
-    with o1:
-        lookup_since_year = st.number_input(
-            "Only races since (year)", min_value=2010, max_value=date.today().year, value=2024, step=1,
-            help="Discovery costs one API call per event, so narrowing the years keeps the lookup fast.",
-        )
-    with o2:
-        lookup_include_virtual = st.checkbox("Include virtual events", value=False)
-    with o3:
-        lookup_include_older = st.checkbox(
-            "Include older years",
-            value=False,
-            help=f"Off scans only the {rsu.DEFAULT_DISCOVERY_EVENT_DAYS} most recent race days.",
-        )
+        if st.button("Search RunSignUp Results", type="primary"):
+            if not lookup_first_name.strip() and not lookup_last_name.strip():
+                st.error("Enter a first name, a last name, or both.")
+            else:
+                with st.spinner("Searching RunSignUp result sets..."):
+                    try:
+                        st.session_state.results_lookup = cached_runner_results(
+                            int(lookup_race_id),
+                            lookup_first_name.strip(),
+                            lookup_last_name.strip(),
+                            f"{int(lookup_since_year)}-01-01",
+                            lookup_include_virtual,
+                            lookup_include_older,
+                        )
+                        st.session_state.results_lookup_error = ""
+                    except Exception as exc:
+                        st.session_state.results_lookup = []
+                        st.session_state.results_lookup_error = str(exc)
 
-    if st.button("Search RunSignUp Results", type="primary"):
-        if not lookup_first_name.strip() and not lookup_last_name.strip():
-            st.error("Enter a first name, a last name, or both.")
-        else:
-            with st.spinner("Searching RunSignUp result sets..."):
+        if st.session_state.get("results_lookup_error"):
+            st.error("RunSignUp results lookup failed.")
+            st.code(st.session_state.results_lookup_error)
+
+        found_rows = st.session_state.get("results_lookup")
+        if found_rows is not None and not st.session_state.get("results_lookup_error"):
+            if not found_rows:
+                st.warning(
+                    "No matching results found. Check the spelling, widen the year range, or confirm the runner "
+                    "finished this race. RunSignUp matches on the name used at registration."
+                )
+            else:
+                st.success(f"Found {len(found_rows)} result(s).")
+
+                found_display = pd.DataFrame(
+                    [
+                        {
+                            "Date": row["race_date"],
+                            "Race": row["race_name"],
+                            "Race Type": row["race_type"],
+                            "Runner": row["runner_name"],
+                            "Finish Time": row["finish_time"],
+                            "Place": row["_raw"].get("place", ""),
+                            "Age": row["_raw"].get("age", ""),
+                            "Pace": row["_raw"].get("pace", ""),
+                            "Hometown": ", ".join(
+                                part for part in [row["_raw"].get("city", ""), row["_raw"].get("state", "")] if part
+                            ),
+                        }
+                        for row in found_rows
+                    ]
+                )
+                st.dataframe(found_display, width='stretch', hide_index=True)
+
+                import_labels = [
+                    f"{idx}: {row['race_date']} | {row['race_type']} | {row['race_name']} | {row['finish_time']}"
+                    for idx, row in enumerate(found_rows)
+                ]
+                chosen_imports = st.multiselect(
+                    "Select results to add to your race list",
+                    import_labels,
+                    default=import_labels,
+                    key="results_import_select",
+                )
+
+                if st.button("Add Selected Results to My Race List"):
+                    added = 0
+                    for label in chosen_imports:
+                        row = dict(found_rows[int(label.split(":", 1)[0])])
+                        row.pop("_raw", None)
+                        if not row.get("race_type"):
+                            row["race_type"] = "Half Marathon"
+                        add_race_entry(row, source=storage.SOURCE_API)
+                        added += 1
+                    st.success(f"Added {added} real result(s) from RunSignUp. These replace hand-entered finish times.")
+                    st.rerun()
+
+        st.divider()
+        st.subheader("Browse a Full Leaderboard")
+        st.caption("Useful for sanity-checking a result set, and the basis for future head-to-head comparisons.")
+
+        # Streamlit executes every tab on every rerun, so this discovery call has to
+        # stay behind an explicit button -- otherwise each page load fires a burst of
+        # RunSignUp requests for visitors who never open this tab.
+        if st.button("List Available Result Sets"):
+            with st.spinner("Discovering public result sets..."):
                 try:
-                    st.session_state.results_lookup = cached_runner_results(
+                    st.session_state.available_sets = cached_result_sets(
                         int(lookup_race_id),
-                        lookup_first_name.strip(),
-                        lookup_last_name.strip(),
                         f"{int(lookup_since_year)}-01-01",
                         lookup_include_virtual,
                         lookup_include_older,
                     )
-                    st.session_state.results_lookup_error = ""
+                    st.session_state.available_sets_error = ""
                 except Exception as exc:
-                    st.session_state.results_lookup = []
-                    st.session_state.results_lookup_error = str(exc)
+                    st.session_state.available_sets = []
+                    st.session_state.available_sets_error = str(exc)
 
-    if st.session_state.get("results_lookup_error"):
-        st.error("RunSignUp results lookup failed.")
-        st.code(st.session_state.results_lookup_error)
+        if st.session_state.get("available_sets_error"):
+            st.error("Could not list result sets for this race.")
+            st.code(st.session_state.available_sets_error)
 
-    found_rows = st.session_state.get("results_lookup")
-    if found_rows is not None and not st.session_state.get("results_lookup_error"):
-        if not found_rows:
-            st.warning(
-                "No matching results found. Check the spelling, widen the year range, or confirm the runner "
-                "finished this race. RunSignUp matches on the name used at registration."
-            )
+        available_sets = st.session_state.get("available_sets")
+        if available_sets is None:
+            st.info("Click **List Available Result Sets** to see which years and distances have published results.")
+        elif not available_sets:
+            st.info("No public result sets found for this race in the selected year range.")
         else:
-            st.success(f"Found {len(found_rows)} result(s).")
-
-            found_display = pd.DataFrame(
-                [
-                    {
-                        "Date": row["race_date"],
-                        "Race": row["race_name"],
-                        "Race Type": row["race_type"],
-                        "Runner": row["runner_name"],
-                        "Finish Time": row["finish_time"],
-                        "Place": row["_raw"].get("place", ""),
-                        "Age": row["_raw"].get("age", ""),
-                        "Pace": row["_raw"].get("pace", ""),
-                        "Hometown": ", ".join(
-                            part for part in [row["_raw"].get("city", ""), row["_raw"].get("state", "")] if part
-                        ),
-                    }
-                    for row in found_rows
-                ]
-            )
-            st.dataframe(found_display, width='stretch', hide_index=True)
-
-            import_labels = [
-                f"{idx}: {row['race_date']} | {row['race_type']} | {row['race_name']} | {row['finish_time']}"
-                for idx, row in enumerate(found_rows)
+            set_labels = [
+                f"{idx}: {entry['date']} | {entry['race_type'] or entry['name']} | set {entry['result_set_id']}"
+                for idx, entry in enumerate(available_sets)
             ]
-            chosen_imports = st.multiselect(
-                "Select results to add to your race list",
-                import_labels,
-                default=import_labels,
-                key="results_import_select",
-            )
+            chosen_set_label = st.selectbox("Result set", set_labels, key="leaderboard_set_select")
+            chosen_set = available_sets[int(chosen_set_label.split(":", 1)[0])]
+            leaderboard_size = st.slider("Rows to show", min_value=10, max_value=200, value=25, step=5)
 
-            if st.button("Add Selected Results to My Race List"):
-                added = 0
-                for label in chosen_imports:
-                    row = dict(found_rows[int(label.split(":", 1)[0])])
-                    row.pop("_raw", None)
-                    if not row.get("race_type"):
-                        row["race_type"] = "Half Marathon"
-                    add_race_entry(row, source=storage.SOURCE_API)
-                    added += 1
-                st.success(f"Added {added} real result(s) from RunSignUp. These replace hand-entered finish times.")
-                st.rerun()
+            if st.button("Load Leaderboard"):
+                with st.spinner("Loading results..."):
+                    try:
+                        leaderboard = rsu.fetch_results(
+                            chosen_set["race_id"],
+                            chosen_set["event_id"],
+                            chosen_set["result_set_id"],
+                            results_per_page=int(leaderboard_size),
+                            max_pages=1,
+                        )
+                        st.session_state.leaderboard_rows = leaderboard
+                        st.session_state.leaderboard_label = (
+                            f"{chosen_set['race_name']} - {chosen_set['name']} ({chosen_set['date']})"
+                        )
+                    except Exception as exc:
+                        st.session_state.leaderboard_rows = []
+                        st.error("Leaderboard load failed.")
+                        st.code(str(exc))
 
-    st.divider()
-    st.subheader("Browse a Full Leaderboard")
-    st.caption("Useful for sanity-checking a result set, and the basis for future head-to-head comparisons.")
-
-    # Streamlit executes every tab on every rerun, so this discovery call has to
-    # stay behind an explicit button -- otherwise each page load fires a burst of
-    # RunSignUp requests for visitors who never open this tab.
-    if st.button("List Available Result Sets"):
-        with st.spinner("Discovering public result sets..."):
-            try:
-                st.session_state.available_sets = cached_result_sets(
-                    int(lookup_race_id),
-                    f"{int(lookup_since_year)}-01-01",
-                    lookup_include_virtual,
-                    lookup_include_older,
+            if st.session_state.get("leaderboard_rows"):
+                st.markdown(f"**{st.session_state.get('leaderboard_label', '')}**")
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Place": row.get("place", ""),
+                                "Bib": row.get("bib", ""),
+                                "Name": f"{row.get('first_name', '')} {row.get('last_name', '')}".strip(),
+                                "Gender": row.get("gender", ""),
+                                "Age": row.get("age", ""),
+                                "Hometown": ", ".join(
+                                    part for part in [row.get("city", ""), row.get("state", "")] if part
+                                ),
+                                "Chip Time": row.get("chip_time", ""),
+                                "Clock Time": row.get("clock_time", ""),
+                                "Pace": row.get("pace", ""),
+                            }
+                            for row in st.session_state.leaderboard_rows
+                        ]
+                    ),
+                    width='stretch',
+                    hide_index=True,
                 )
-                st.session_state.available_sets_error = ""
-            except Exception as exc:
-                st.session_state.available_sets = []
-                st.session_state.available_sets_error = str(exc)
-
-    if st.session_state.get("available_sets_error"):
-        st.error("Could not list result sets for this race.")
-        st.code(st.session_state.available_sets_error)
-
-    available_sets = st.session_state.get("available_sets")
-    if available_sets is None:
-        st.info("Click **List Available Result Sets** to see which years and distances have published results.")
-    elif not available_sets:
-        st.info("No public result sets found for this race in the selected year range.")
-    else:
-        set_labels = [
-            f"{idx}: {entry['date']} | {entry['race_type'] or entry['name']} | set {entry['result_set_id']}"
-            for idx, entry in enumerate(available_sets)
-        ]
-        chosen_set_label = st.selectbox("Result set", set_labels, key="leaderboard_set_select")
-        chosen_set = available_sets[int(chosen_set_label.split(":", 1)[0])]
-        leaderboard_size = st.slider("Rows to show", min_value=10, max_value=200, value=25, step=5)
-
-        if st.button("Load Leaderboard"):
-            with st.spinner("Loading results..."):
-                try:
-                    leaderboard = rsu.fetch_results(
-                        chosen_set["race_id"],
-                        chosen_set["event_id"],
-                        chosen_set["result_set_id"],
-                        results_per_page=int(leaderboard_size),
-                        max_pages=1,
-                    )
-                    st.session_state.leaderboard_rows = leaderboard
-                    st.session_state.leaderboard_label = (
-                        f"{chosen_set['race_name']} - {chosen_set['name']} ({chosen_set['date']})"
-                    )
-                except Exception as exc:
-                    st.session_state.leaderboard_rows = []
-                    st.error("Leaderboard load failed.")
-                    st.code(str(exc))
-
-        if st.session_state.get("leaderboard_rows"):
-            st.markdown(f"**{st.session_state.get('leaderboard_label', '')}**")
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "Place": row.get("place", ""),
-                            "Bib": row.get("bib", ""),
-                            "Name": f"{row.get('first_name', '')} {row.get('last_name', '')}".strip(),
-                            "Gender": row.get("gender", ""),
-                            "Age": row.get("age", ""),
-                            "Hometown": ", ".join(
-                                part for part in [row.get("city", ""), row.get("state", "")] if part
-                            ),
-                            "Chip Time": row.get("chip_time", ""),
-                            "Clock Time": row.get("clock_time", ""),
-                            "Pace": row.get("pace", ""),
-                        }
-                        for row in st.session_state.leaderboard_rows
-                    ]
-                ),
-                width='stretch',
-                hide_index=True,
-            )
 
 
 # -------------------------------------------------
