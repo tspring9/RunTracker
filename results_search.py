@@ -252,6 +252,71 @@ def _parse_cursor(resume_cursor: str) -> int:
         return 0
 
 
+def match_identity(row: dict) -> tuple:
+    """Identity of a single *finish*, independent of which result set published it.
+
+    Candidates are ``(race_id, event_id, result_set_id)`` triples, but a
+    single event is routinely published as several result sets -- Overall,
+    Age Group, gender splits -- and every finisher appears in all of them.
+    Measured live on 2026-10-09: of 1,913 distinct events in a catalog
+    sample, 70 (3.7%) carried more than one result set, up to 4 on one
+    event, and each runner was present in *every* set (race 6606 / event
+    16127, sets 1313/1317/1334/1335). Without collapsing them, one race of
+    yours becomes up to four identical rows, each with its own "This is me"
+    button -- which would add the same race to the tracker four times.
+
+    ``bib`` is the discriminator when published, since it is unique within
+    an event. Falling back to name + age + finish time keeps two genuine
+    same-name runners in one event apart (they differ on at least one),
+    rather than silently dropping one of them.
+    """
+    raw = row.get("_raw") or {}
+    context = row.get("_context") or {}
+
+    bib = str(raw.get("bib", "") or "").strip()
+    if bib:
+        identity = f"bib:{bib}"
+    else:
+        identity = "|".join(
+            (
+                runner_matching.normalize_name(raw.get("first_name", "")),
+                runner_matching.normalize_name(raw.get("last_name", "")),
+                str(raw.get("age", "") or "").strip(),
+                str(row.get("finish_time", "") or "").strip(),
+            )
+        )
+    return (context.get("race_id"), context.get("event_id"), identity)
+
+
+def dedupe_matches(matches: list[dict]) -> list[dict]:
+    """Collapse rows that are the same finish published in several result sets.
+
+    Order-stable -- the first occurrence keeps its position, which matters
+    because the caller accumulates matches across resumed sweeps and the
+    list order is what the user reads. The one exception: a row carrying a
+    *usable* age replaces an incumbent without one, because age is the only
+    signal that can move a row out of "Possible" and into High/Rejected, so
+    preferring the informative duplicate strictly improves classification.
+    """
+    best: dict[tuple, dict] = {}
+    order: list[tuple] = []
+
+    for row in matches:
+        key = match_identity(row)
+        incumbent = best.get(key)
+        if incumbent is None:
+            best[key] = row
+            order.append(key)
+            continue
+
+        incumbent_age = runner_matching.parse_result_age((incumbent.get("_raw") or {}).get("age"))
+        candidate_age = runner_matching.parse_result_age((row.get("_raw") or {}).get("age"))
+        if incumbent_age is None and candidate_age is not None:
+            best[key] = row
+
+    return [best[key] for key in order]
+
+
 def sweep_for_runner(
     first_name: str,
     last_name: str,

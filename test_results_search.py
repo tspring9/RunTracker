@@ -138,3 +138,100 @@ def test_sweep_signature_and_source_exclude_private_identity_fields():
         )
     }
     assert not ({"dob", "birth", "email"} & source_identifiers)
+
+
+# ---------------------------------------------------------------------------
+# De-duplication across result sets (SPR-15 follow-up).
+#
+# Pinned to a real measurement: RunSignUp race 6606 / event 16127 publishes
+# four result sets (1313, 1317, 1334, 1335) and every finisher appears in all
+# four. Candidates are (race_id, event_id, result_set_id) triples, so without
+# collapsing, one race shows up four times -- each with its own "This is me"
+# button, i.e. four tracker entries for one finish.
+# ---------------------------------------------------------------------------
+
+
+def _match(result_set_id, bib="101", age=40, first="Justin", last="Spring", finish="22:15"):
+    return {
+        "race_name": "Real Race",
+        "finish_time": finish,
+        "_raw": {"first_name": first, "last_name": last, "age": age, "bib": bib},
+        "_context": {"race_id": 6606, "event_id": 16127, "result_set_id": result_set_id},
+    }
+
+
+def test_same_finish_in_four_result_sets_collapses_to_one_row():
+    rows = [_match(sid) for sid in (1313, 1317, 1334, 1335)]
+
+    deduped = search.dedupe_matches(rows)
+
+    assert len(deduped) == 1
+
+
+def test_dedupe_keys_on_bib_within_an_event_not_on_result_set():
+    # Same event, same name, different bib -> two different people, both kept.
+    rows = [_match(1313, bib="101"), _match(1317, bib="202")]
+
+    assert len(search.dedupe_matches(rows)) == 2
+
+
+def test_dedupe_does_not_merge_across_different_events():
+    first = _match(1313)
+    second = _match(1313)
+    second["_context"] = {"race_id": 6606, "event_id": 99999, "result_set_id": 1313}
+
+    assert len(search.dedupe_matches([first, second])) == 2
+
+
+def test_dedupe_without_bib_keeps_two_same_name_runners_with_different_times():
+    rows = [
+        _match(1313, bib="", finish="22:15"),
+        _match(1317, bib="", finish="31:48"),
+    ]
+
+    assert len(search.dedupe_matches(rows)) == 2
+
+
+def test_dedupe_without_bib_collapses_identical_unbibbed_finishes():
+    rows = [_match(1313, bib=""), _match(1317, bib="")]
+
+    assert len(search.dedupe_matches(rows)) == 1
+
+
+def test_dedupe_prefers_the_duplicate_that_carries_a_usable_age():
+    # Age is the only signal that can lift a row out of "Possible", so the
+    # informative duplicate must win regardless of arrival order.
+    without_age = _match(1313, age="")
+    with_age = _match(1317, age=40)
+
+    assert search.dedupe_matches([without_age, with_age])[0]["_raw"]["age"] == 40
+    assert search.dedupe_matches([with_age, without_age])[0]["_raw"]["age"] == 40
+
+
+def test_dedupe_treats_junk_age_as_unusable_when_choosing_a_winner():
+    # age=952 is a real published value; it must not beat a usable age.
+    junk = _match(1313, age=952)
+    usable = _match(1317, age=40)
+
+    assert search.dedupe_matches([junk, usable])[0]["_raw"]["age"] == 40
+
+
+def test_dedupe_is_order_stable_and_handles_empty_input():
+    assert search.dedupe_matches([]) == []
+
+    a = _match(1313, bib="1")
+    b = _match(1313, bib="2")
+    c = _match(1313, bib="3")
+    order = [row["_raw"]["bib"] for row in search.dedupe_matches([a, b, c, a, b])]
+
+    assert order == ["1", "2", "3"]
+
+
+def test_dedupe_tolerates_rows_missing_raw_and_context():
+    rows = [{}, {"_raw": None, "_context": None}]
+
+    assert len(search.dedupe_matches(rows)) == 1
+
+
+def test_match_identity_ignores_result_set_id():
+    assert search.match_identity(_match(1313)) == search.match_identity(_match(9999))

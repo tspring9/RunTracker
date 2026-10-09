@@ -558,9 +558,14 @@ def classify_signup_matches(matches: list, dob: date) -> list:
     sweep currently has an empty race_date. Backfilled here from
     _context["event_date"] rather than touching the frozen SPR-17
     contract; flagged on SPR-18 for the backend owner to fix at the source.
+
+    De-duplication happens here rather than inside sweep_for_runner because
+    this is the only place that sees the *accumulated* match list -- the
+    caller appends each resumed sweep's rows to the previous ones, so a
+    per-call dedupe would miss duplicates that straddle the call cap.
     """
     classified = []
-    for row in matches:
+    for row in results_search.dedupe_matches(matches):
         raw = row.get("_raw", {})
         context = row.get("_context", {})
         race_date_str = row.get("race_date") or context.get("event_date", "")
@@ -1031,6 +1036,17 @@ with signup_page:
         high = [r for r in classified if r["_confidence"] == runner_matching.HIGH]
         possible = [r for r in classified if r["_confidence"] == runner_matching.POSSIBLE]
         rejected = [r for r in classified if r["_confidence"] == runner_matching.REJECTED]
+
+        # RunSignUp publishes many events as several result sets (Overall, Age
+        # Group, gender splits) containing the same finishers, so the same race
+        # arrives more than once. Say so rather than silently showing a smaller
+        # number than the sweep reported finding.
+        collapsed = len(st.session_state.signup_matches) - len(classified)
+        if collapsed > 0:
+            st.caption(
+                f"Collapsed {collapsed} duplicate row{'s' if collapsed != 1 else ''} "
+                "— the same finish published in more than one result set."
+            )
 
         affiliate_token = get_secret("RUNSIGNUP_AFFILIATE_TOKEN")
 
