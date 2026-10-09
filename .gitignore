@@ -20,3 +20,8 @@ Thumbs.db
 
 # Generated RunSignUp data pulls (large, regenerable)
 data/
+
+# Local SQLite storage (storage.py) -- never commit real user race data.
+# Streamlit Community Cloud's filesystem is ephemeral anyway; see storage.py.
+*.db
+*.sqlite3
