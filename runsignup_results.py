@@ -79,8 +79,17 @@ _SESSION = _build_session()
 
 
 def _get(path: str, **params) -> dict:
-    """GET a RunSignUp REST path and raise on both HTTP and API-level errors."""
-    params.setdefault("format", "json")
+    """GET a RunSignUp REST path and raise on both HTTP and API-level errors.
+
+    ``path`` can be any ``{RESULTS_API_HOST}``-relative path, including the
+    ``/v2/...`` result-set catalog, which already ends in ``.json``. The
+    ``format=json`` default is skipped for those paths -- it is redundant
+    with the extension, and verified live to be harmless either way, but
+    skipping it keeps the request shape unambiguous rather than relying on
+    RunSignUp silently tolerating both.
+    """
+    if not path.endswith(".json"):
+        params.setdefault("format", "json")
     response = _SESSION.get(f"{RESULTS_API_HOST}{path}", params=params, timeout=DEFAULT_TIMEOUT)
 
     if response.status_code != 200:
@@ -459,6 +468,106 @@ def find_runner_results(
 
     rows.sort(key=lambda row: row.get("race_date", ""), reverse=True)
     return rows
+
+
+# -------------------------------------------------
+# Scoped result-set catalog + state/year race search (SPR-15/17)
+# -------------------------------------------------
+RESULT_SET_CATALOG_HOST_PATH = "/v2/results/updated-result-sets.json"
+RESULT_SET_CATALOG_PAGE_SIZE = 5000
+
+
+def fetch_result_set_catalog(
+    modified_since_timestamp: int | None = None,
+    page: int = 1,
+    results_per_page: int = RESULT_SET_CATALOG_PAGE_SIZE,
+) -> list[dict]:
+    """GET /v2/results/updated-result-sets.json -- the public result-set catalog.
+
+    -> [{"race_id", "event_id", "result_set_id", "race_name", "last_modified_ts"}]
+
+    Returns [] on an empty page (that is the paging terminator). Verified
+    live against the real endpoint: it is sorted ascending by
+    ``last_modified_ts`` (ties broken by id), which is what makes
+    ``modified_since_timestamp`` a usable incremental-sync watermark, and
+    its page-size query param is ``num_per_page`` (not ``results_per_page``
+    -- that name is kept on this function only to match RunTracker's own
+    paging convention) capped at 5000.
+    """
+    params = {
+        "page": page,
+        "num_per_page": results_per_page,
+    }
+    if modified_since_timestamp is not None:
+        params["modified_since_timestamp"] = modified_since_timestamp
+
+    payload = _get(RESULT_SET_CATALOG_HOST_PATH, **params)
+    rows = payload.get("result_sets") or []
+    return [
+        {
+            "race_id": row.get("race_id"),
+            "event_id": row.get("event_id"),
+            "result_set_id": row.get("individual_result_set_id"),
+            "race_name": row.get("race_name", ""),
+            "last_modified_ts": row.get("last_modified_ts"),
+        }
+        for row in rows
+    ]
+
+
+def search_races_by_state_range(
+    state: str, start_date: str, end_date: str, page: int = 1, results_per_page: int = 1000
+) -> list[dict]:
+    """GET /races for one state/year window -- a whole state-year in 1-2 calls.
+
+    -> [{"race_id", "name", "city", "state", "url", "event_dates": [iso, ...]}]
+    """
+    params = {
+        "state": str(state or "").strip().upper(),
+        "start_date": start_date,
+        "end_date": end_date,
+        "events": "T",
+        "page": page,
+        "results_per_page": results_per_page,
+    }
+    payload = _get("/races", **params)
+    races = []
+    for wrapper in payload.get("races") or []:
+        race = wrapper.get("race", wrapper)
+        address = race.get("address") or {}
+        races.append(
+            {
+                "race_id": race.get("race_id"),
+                "name": race.get("name", ""),
+                "city": address.get("city", ""),
+                "state": (address.get("state") or "").upper(),
+                "url": race.get("url") or race.get("external_race_url") or "",
+                "event_dates": _race_event_dates(race),
+            }
+        )
+    return races
+
+
+def event_has_results(race_id: int, event_id: int) -> bool:
+    """GET /race/{race_id}/results/has-result-sets -> has_results == "T".
+
+    Cheap pruning filter. Never raises -- return False on RunSignUpError.
+
+    Deviation from the SPR-17 ticket's documented signature
+    ``event_has_results(event_id: int) -> bool``: RunSignUp's real endpoint
+    is race-scoped (``/race/{race_id}/results/has-result-sets``), confirmed
+    live -- the bare ``/results/has-result-sets`` path the ticket describes
+    returns ``{"error": {"error_code": 1, "error_msg": "Unknown method"}}``
+    for every call. Dropping race_id would make this pruning filter always
+    return False (silently useless) rather than ever pruning anything, so
+    race_id was added as a required parameter. Flagged in the SPR-17
+    done-comment for the dependent issues to confirm.
+    """
+    try:
+        payload = _get(f"/race/{race_id}/results/has-result-sets", event_id=event_id)
+    except RunSignUpError:
+        return False
+    return payload.get("has_results") == "T"
 
 
 # -------------------------------------------------
