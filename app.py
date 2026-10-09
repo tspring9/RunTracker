@@ -763,8 +763,10 @@ with results_page:
                 for race in race_matches
             ]
             selected_label = st.selectbox("Matching race", race_labels)
-            selected_race_id = race_matches[race_labels.index(selected_label)]["race_id"]
-            st.link_button("Open on RunSignUp", race_matches[race_labels.index(selected_label)]["url"])
+            selected_race = race_matches[race_labels.index(selected_label)]
+            selected_race_id = selected_race["race_id"]
+            if selected_race["url"]:
+                st.link_button("Open on RunSignUp", selected_race["url"])
         elif "race_search_results" in st.session_state and not st.session_state.get("race_search_error"):
             st.info("No matching races found.")
 
