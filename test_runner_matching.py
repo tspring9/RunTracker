@@ -136,6 +136,36 @@ def test_normalize_name_accents():
     assert matching.normalize_name("Núñez") == matching.normalize_name("Nunez")
 
 
+@pytest.mark.parametrize(
+    "with_letter,ascii_form",
+    [
+        ("Jørgensen", "Jorgensen"),
+        ("Straße", "Strasse"),
+        ("Wałęsa", "Walesa"),
+        ("Ærøe", "AEroe"),
+        ("Guðmundsson", "Gudmundsson"),
+    ],
+)
+def test_normalize_name_folds_letters_nfkd_cannot_decompose(with_letter, ascii_form):
+    # SPR-45: o-slash, sharp-s, l-stroke, ae and eth have no base-plus-
+    # combining-mark decomposition, so plain NFKD (unlike for "Núñez" above)
+    # leaves them untouched. normalize_name must still agree with the ASCII
+    # spelling, or the local matching rule silently stops covering these names.
+    assert matching.normalize_name(with_letter) == matching.normalize_name(ascii_form)
+
+
+def test_fold_to_ascii_matches_the_measured_letters():
+    assert matching.fold_to_ascii("ø") == "o"
+    assert matching.fold_to_ascii("Ø") == "O"
+    assert matching.fold_to_ascii("ß") == "ss"
+    assert matching.fold_to_ascii("ł") == "l"
+    assert matching.fold_to_ascii("Ł") == "L"
+    assert matching.fold_to_ascii("æ") == "ae"
+    assert matching.fold_to_ascii("Æ") == "AE"
+    assert matching.fold_to_ascii("ð") == "d"
+    assert matching.fold_to_ascii("Ð") == "D"
+
+
 def test_normalize_name_strips_trailing_suffix():
     assert matching.normalize_name("Smith Jr") == "smith"
     assert matching.normalize_name("Smith Jr.") == "smith"

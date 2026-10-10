@@ -118,6 +118,41 @@ _NAME_SIGNAL_REASON = {
     "initial": "the result only published a first initial",
 }
 
+# Letters with no base-plus-combining-mark decomposition, so NFKD leaves them
+# untouched -- unlike "é", which NFKD splits into "e" + a combining accent
+# that normalize_name then strips. SPR-45 measured that RunSignUp's own
+# get-results name filter folds combining-mark accents but drops a row
+# outright for any of these, so a query has to be folded to this table's
+# values before the request goes out, or the row never arrives to match
+# against locally. Scoped to the letters SPR-45 measured; not exhaustive.
+_ASCII_FOLD_MAP = str.maketrans(
+    {
+        "ø": "o",  # o with stroke
+        "Ø": "O",
+        "ß": "ss",  # sharp s
+        "ł": "l",  # l with stroke
+        "Ł": "L",
+        "æ": "ae",  # ae ligature
+        "Æ": "AE",
+        "ð": "d",  # eth
+        "Ð": "D",
+    }
+)
+
+
+def fold_to_ascii(value: str) -> str:
+    """Fold combining-mark accents and the non-decomposable letters above.
+
+    Used both as ``normalize_name``'s first step and directly by
+    ``runsignup_results.fetch_results`` to ASCII-fold a query name before it
+    is sent to the server -- see the module-level comment on
+    ``_ASCII_FOLD_MAP`` for why the transport layer needs this too.
+    """
+    text = str(value or "")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.translate(_ASCII_FOLD_MAP)
+
 
 def normalize_name(value: str) -> str:
     """Casefold, fold accents to their base letters, drop ``.``/``,``, strip a
@@ -125,13 +160,14 @@ def normalize_name(value: str) -> str:
 
     Accent folding means "Núñez" and "Nunez" normalize to the same string --
     QA's accented-name case (SPR-26 §2) was dropped entirely under the old
-    exact-casefold rule. Suffix stripping means "Smith Jr" and "Smith" agree
-    on last name, which is what lets the decision table's last-name check
-    stay a strict equality instead of a fuzzy one.
+    exact-casefold rule. It also covers o-slash, sharp-s, l-stroke, ae and
+    eth (SPR-45) via :func:`fold_to_ascii`, since NFKD alone does not reach
+    those. Suffix stripping means "Smith Jr" and "Smith" agree on last name,
+    which is what lets the decision table's last-name check stay a strict
+    equality instead of a fuzzy one.
     """
     text = str(value or "").strip()
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = fold_to_ascii(text)
     text = text.casefold()
     text = _PUNCTUATION_RE.sub("", text)
     text = _WHITESPACE_RE.sub(" ", text).strip()

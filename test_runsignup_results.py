@@ -316,5 +316,33 @@ class SearchRacesInWindowTests(unittest.TestCase):
         self.assertLessEqual(budget.used, 4)
 
 
+# ---------------------------------------------------------------------------
+# SPR-45: RunSignUp's get-results name filter folds combining-mark accents
+# but drops a row outright for o-slash/sharp-s/l-stroke/ae/eth, so the query
+# has to be ASCII-folded before the request goes out -- see runner_matching
+# .fold_to_ascii and its comment on _ASCII_FOLD_MAP for the full measurement.
+# ---------------------------------------------------------------------------
+class FetchResultsNameFoldingTests(unittest.TestCase):
+    @patch("runsignup_results._get")
+    def test_first_and_last_name_are_ascii_folded_before_the_request(self, mock_get):
+        mock_get.return_value = {"individual_results_sets": [{"results": []}]}
+
+        rsu.fetch_results(1, 2, 3, first_name="Jørgensen", last_name="Guðmundsson")
+
+        _, params = mock_get.call_args
+        self.assertEqual(params["first_name"], "Jorgensen")
+        self.assertEqual(params["last_name"], "Gudmundsson")
+
+    @patch("runsignup_results._get")
+    def test_plain_ascii_names_pass_through_unchanged(self, mock_get):
+        mock_get.return_value = {"individual_results_sets": [{"results": []}]}
+
+        rsu.fetch_results(1, 2, 3, first_name="Mary", last_name="Smith")
+
+        _, params = mock_get.call_args
+        self.assertEqual(params["first_name"], "Mary")
+        self.assertEqual(params["last_name"], "Smith")
+
+
 if __name__ == "__main__":
     unittest.main()

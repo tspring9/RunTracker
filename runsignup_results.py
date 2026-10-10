@@ -27,6 +27,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import runner_matching
+
 # -------------------------------------------------
 # Endpoints
 # -------------------------------------------------
@@ -384,6 +386,13 @@ def fetch_results(
     ``first_name`` / ``last_name`` are honoured server-side, which is what makes
     "find my result in a 1,156-person race" cheap -- pass them whenever you can
     instead of downloading the whole field and filtering locally.
+
+    Both are ASCII-folded before the request goes out (SPR-45): RunSignUp's
+    name filter folds combining-mark accents but not o-slash, sharp-s,
+    l-stroke, ae or eth, so a query carrying one of those letters gets zero
+    rows back from the server, before any local matching runs. Folding here
+    widens the query slightly -- harmless, since every row returned still
+    has to pass the caller's own name-agreement check.
     """
     results: list[dict] = []
     page_size = max(1, min(int(results_per_page), MAX_RESULTS_PER_PAGE))
@@ -396,9 +405,9 @@ def fetch_results(
             "results_per_page": page_size,
         }
         if first_name:
-            params["first_name"] = first_name
+            params["first_name"] = runner_matching.fold_to_ascii(first_name)
         if last_name:
-            params["last_name"] = last_name
+            params["last_name"] = runner_matching.fold_to_ascii(last_name)
 
         payload = _get(f"/race/{race_id}/results/get-results", **params)
         sets = payload.get("individual_results_sets") or []
