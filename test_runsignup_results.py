@@ -1,6 +1,6 @@
 import unittest
 from datetime import date, timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import runsignup_results as rsu
 
@@ -195,6 +195,125 @@ class EventHasResultsTests(unittest.TestCase):
     def test_never_raises_on_api_error(self, mock_get):
         mock_get.side_effect = rsu.RunSignUpError("Event not found.")
         self.assertFalse(rsu.event_has_results(2017, 999999999))
+
+
+# ---------------------------------------------------------------------------
+# _get hardening (SPR-30/SPR-42) -- a raw upstream body must never reach an
+# exception message, and specific upstream failures get plain-language text.
+# ---------------------------------------------------------------------------
+class GetHardeningTests(unittest.TestCase):
+    def _fake_response(self, status_code=200, json_payload=None, json_raises=False):
+        response = Mock()
+        response.status_code = status_code
+        if json_raises:
+            response.json.side_effect = ValueError("Expecting value: line 1 column 1 (char 0)")
+        else:
+            response.json.return_value = json_payload
+        response.text = "<html><body>a 10,000-character name produced this</body></html>"
+        return response
+
+    @patch("runsignup_results._SESSION")
+    def test_non_json_body_raises_generic_message_not_the_html(self, mock_session):
+        mock_session.get.return_value = self._fake_response(status_code=200, json_raises=True)
+        with self.assertRaises(rsu.RunSignUpError) as ctx:
+            rsu._get("/races", state="MO")
+        self.assertNotIn("html", str(ctx.exception).lower())
+        self.assertNotIn("10,000", str(ctx.exception))
+
+    @patch("runsignup_results._SESSION")
+    def test_error_code_13_names_credentials_scope_never_log_in(self, mock_session):
+        mock_session.get.return_value = self._fake_response(
+            status_code=200,
+            json_payload={"error": {"error_code": 13, "error_msg": "You must be logged in to the API as a user"}},
+        )
+        with self.assertRaises(rsu.RunSignUpError) as ctx:
+            rsu._get("/races", state="MO", page=2)
+        message = str(ctx.exception).lower()
+        self.assertIn("credentials", message)
+        self.assertNotIn("log in", message)
+        self.assertNotIn("logged in", message)
+
+    @patch("runsignup_results._SESSION")
+    def test_http_414_names_the_name_length_not_the_body(self, mock_session):
+        mock_session.get.return_value = self._fake_response(status_code=414, json_raises=True)
+        with self.assertRaises(rsu.RunSignUpError) as ctx:
+            rsu._get("/races", first_name="Q" * 10000)
+        self.assertIn("too long", str(ctx.exception).lower())
+        self.assertNotIn("html", str(ctx.exception).lower())
+
+    @patch("runsignup_results._SESSION")
+    def test_other_non_200_status_never_includes_the_raw_body(self, mock_session):
+        mock_session.get.return_value = self._fake_response(status_code=500, json_payload={"ok": False})
+        with self.assertRaises(rsu.RunSignUpError) as ctx:
+            rsu._get("/races", state="MO")
+        self.assertNotIn("html", str(ctx.exception).lower())
+
+    @patch("runsignup_results._SESSION")
+    def test_successful_response_passes_through(self, mock_session):
+        mock_session.get.return_value = self._fake_response(status_code=200, json_payload={"races": []})
+        self.assertEqual(rsu._get("/races", state="MO"), {"races": []})
+
+
+# ---------------------------------------------------------------------------
+# search_races_in_window (SPR-30/SPR-36) -- adaptive date-window splitting;
+# must never request /races page >= 2.
+# ---------------------------------------------------------------------------
+class SearchRacesInWindowTests(unittest.TestCase):
+    class _FakeBudget:
+        def __init__(self, limit):
+            self.limit = limit
+            self.used = 0
+
+        def spend(self, n=1):
+            if self.used + n > self.limit:
+                return False
+            self.used += n
+            return True
+
+    def test_never_requests_page_two(self):
+        seen_pages = []
+
+        def fake_search(state, start_date, end_date, page=1, results_per_page=1000):
+            seen_pages.append(page)
+            return [{"race_id": 1, "name": "r", "city": "", "state": state, "url": "", "event_dates": [start_date]}]
+
+        with patch("runsignup_results.search_races_by_state_range", side_effect=fake_search):
+            rsu.search_races_in_window("MO", "2026-01-01", "2026-12-31", self._FakeBudget(limit=10))
+
+        self.assertTrue(all(page == 1 for page in seen_pages))
+
+    def test_splits_a_full_page_in_half_and_merges_results(self):
+        calls = []
+
+        def fake_search(state, start_date, end_date, page=1, results_per_page=1000):
+            calls.append((start_date, end_date))
+            if (start_date, end_date) == ("2026-01-01", "2026-12-31"):
+                return [
+                    {"race_id": i, "name": f"r{i}", "city": "", "state": state, "url": "", "event_dates": ["2026-06-01"]}
+                    for i in range(rsu.MAX_RESULTS_PER_PAGE)
+                ]
+            return [{"race_id": 9000, "name": "half", "city": "", "state": state, "url": "", "event_dates": [start_date]}]
+
+        with patch("runsignup_results.search_races_by_state_range", side_effect=fake_search):
+            result = rsu.search_races_in_window("MO", "2026-01-01", "2026-12-31", self._FakeBudget(limit=10))
+
+        self.assertEqual(len(calls), 3)  # the full-window call, then two halves
+        self.assertTrue(all(start != "2026-01-01" or end != "2026-12-31" for start, end in calls[1:]))
+        self.assertEqual({race["race_id"] for race in result}, {9000})
+
+    def test_never_spends_past_the_budget(self):
+        def fake_search(state, start_date, end_date, page=1, results_per_page=1000):
+            # Always a full page, so this would split forever without a budget.
+            return [
+                {"race_id": i, "name": f"r{i}", "city": "", "state": state, "url": "", "event_dates": ["2026-06-01"]}
+                for i in range(rsu.MAX_RESULTS_PER_PAGE)
+            ]
+
+        budget = self._FakeBudget(limit=4)
+        with patch("runsignup_results.search_races_by_state_range", side_effect=fake_search):
+            rsu.search_races_in_window("MO", "2026-01-01", "2026-12-31", budget)
+
+        self.assertLessEqual(budget.used, 4)
 
 
 if __name__ == "__main__":

@@ -1,48 +1,51 @@
-"""Capped sweep orchestrator for the name-first "Sign Up" results search (SPR-15/17).
+"""Results-search orchestrator for the name-first "Sign Up" search (SPR-15/17/30).
 
-Two-stage pipeline, both stages paying into the same ``scope.max_calls`` cap
-and reporting through the same optional ``progress_cb``:
+SPR-30 moves discovery offline (SPR-26 section 4): walking ``/races`` and the
+public result-set catalog no longer happens inside a user's search. Instead:
 
-1. :func:`candidate_result_sets` -- turn a :class:`SearchScope` (states +
-   year range) into a list of candidate result sets, using
-   ``runsignup_results.search_races_by_state_range`` to learn which races
-   are in scope and ``runsignup_results.fetch_result_set_catalog`` to walk
-   the shared public result-set catalog, filtered to those races. Both the
-   race listing and the catalog rows are cached in SQLite (``storage.py``)
-   so repeat searches (by this user or anyone else) get cheaper over time --
-   the catalog in particular is walked forward from a single shared,
-   continuously-advancing watermark (``storage.catalog_watermark()``), never
-   re-read from the start.
+1. :func:`build_index` -- **CLI only**, never reachable from a page load.
+   Walks ``runsignup_results.search_races_in_window`` (adaptive date-window
+   splitting, never ``/races`` page >= 2 -- SPR-36) and the public
+   result-set catalog, writing both into the existing SQLite tables
+   (``storage.py``). A human runs this when the index needs refreshing.
 
-2. :func:`sweep_for_runner` -- one ``get-results`` call per candidate, name
+2. :func:`indexed_candidates` -- SQLite read only, **zero HTTP**. Turns a
+   :class:`SearchScope` into one candidate per ``(race_id, event_id)``,
+   already collapsed across duplicate result sets, ranked newest-first.
+
+3. :func:`sweep_for_runner` -- one ``get-results`` call per candidate, name
    filters only, re-confirmed locally with ``runner_matching.names_match``.
+   This is the only HTTP a user's search makes; its entire budget is
+   ``scope.max_calls`` (SPR-41: previously each stage got its own budget and
+   together they could exceed the advertised cap).
+
+:func:`candidate_result_sets` (the pre-SPR-30 online discovery path) stays
+for callers not yet migrated onto ``indexed_candidates`` / ``build_index``,
+but is no longer called by anything in this module.
 
 PRIVACY: nothing in this module accepts, logs, or persists a date of birth
 or an email. ``sweep_for_runner`` takes no DOB and no age -- it returns the
 raw RunSignUp ``age`` field (not a DOB) inside ``_raw`` for the *caller* to
-classify with ``runner_matching.classify_confidence`` after any caching
-layer, because ``@st.cache_data`` keys are inspectable.
+classify with ``runner_matching.classify_match`` after any caching layer,
+because ``@st.cache_data`` keys are inspectable.
 
-CALL BUDGET: both stages count every HTTP call against ``scope.max_calls``
-and stop -- never silently exceeding it -- as soon as the budget is spent,
-setting ``stage="capped"``. ``sweep_for_runner`` hands back a ``cursor`` an
-identical follow-up call can resume from via ``resume_cursor``;
-``candidate_result_sets`` has no such parameter, so its own resumability
-comes entirely from the SQLite cache making the next call cheaper, not from
-an explicit cursor.
+CALL BUDGET: a single :class:`CallBudget`, sized from ``scope.max_calls``,
+is spent by every HTTP call a stage makes and can never be exceeded.
 
 CONCURRENCY: at most 2 requests in flight at once (the contract's hard
 limit), reusing ``runsignup_results``'s shared retrying session.
 
-No background or scheduled crawling. Every call here is made inside a
-synchronous function call that only runs when something (ultimately a
-button press) calls it.
+No background or scheduled crawling. ``build_index`` only runs when a human
+invokes the CLI (see ``__main__`` below); everything else only runs inside a
+synchronous function call triggered by something (ultimately a button
+press).
 """
 
 from __future__ import annotations
 
 import concurrent.futures
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import runner_matching
 import runsignup_results as rsu
@@ -52,28 +55,93 @@ MAX_CONCURRENT_REQUESTS = 2
 
 
 @dataclass
+class CallBudget:
+    """One counter, shared by every call a search (or an index build) makes.
+
+    ``spend`` is the only way ``used`` moves, and it refuses once that would
+    exceed ``limit`` -- so no caller can accidentally make a call the budget
+    didn't authorize (SPR-41: two independently-tracked stage budgets
+    together exceeded the advertised cap).
+    """
+
+    limit: int
+    used: int = 0
+
+    def spend(self, n: int = 1) -> bool:
+        if self.used + n > self.limit:
+            return False
+        self.used += n
+        return True
+
+
+@dataclass
 class SearchScope:
     states: tuple[str, ...]
     start_year: int
     end_year: int
     include_virtual: bool = False
-    max_calls: int = 400  # board-approved default cap
+    max_calls: int = 120  # TOTAL for the whole search, every stage (SPR-26 §4/§8)
 
 
 @dataclass
-class SearchProgress:
-    calls_used: int
-    calls_budget: int
-    candidates_total: int
-    candidates_checked: int
-    stage: str  # "catalog" | "races" | "sweep" | "done" | "capped"
+class Coverage:
+    """What the search actually checked, so the UI can say "searched 120 of
+    1,240 known results" instead of "no results" (SPR-26 §4, SPR-32/SPR-40).
+    """
+
+    result_sets_known: int
+    result_sets_checked: int
+    races_known: int
+    budget_limit: int
+    budget_used: int
+    complete: bool  # checked == known
+    index_built_at: str  # ISO, or "" if never built
     cursor: str  # opaque resume token; pass back as resume_cursor
-    capped: bool
+
+    # --- Back-compat shim for pre-SPR-30 callers (the old ``SearchProgress``
+    # field names) -- ``candidate_result_sets`` and ``app.py``'s shared
+    # progress callback read these until SPR-32 migrates them onto the
+    # fields above directly. Computed, not stored, so there is exactly one
+    # source of truth.
+    @property
+    def calls_used(self) -> int:
+        return self.budget_used
+
+    @property
+    def calls_budget(self) -> int:
+        return self.budget_limit
+
+    @property
+    def candidates_total(self) -> int:
+        return self.result_sets_known
+
+    @property
+    def candidates_checked(self) -> int:
+        return self.result_sets_checked
+
+    @property
+    def capped(self) -> bool:
+        return bool(self.cursor)
+
+    @property
+    def stage(self) -> str:
+        if self.complete:
+            return "done"
+        return "capped" if self.cursor else "sweep"
 
 
-def _emit(progress_cb, **kwargs) -> None:
+# SPR-30: Coverage replaces SearchProgress. Kept as a name, not a distinct
+# type, in case anything still imports the old name directly.
+SearchProgress = Coverage
+
+
+def _emit(progress_cb, coverage: Coverage) -> None:
     if progress_cb is not None:
-        progress_cb(SearchProgress(**kwargs))
+        progress_cb(coverage)
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _date_window(scope: SearchScope) -> tuple[str, str]:
@@ -143,9 +211,12 @@ def candidate_result_sets(scope: SearchScope, progress_cb=None) -> list[dict]:
         while True:
             if calls_used >= scope.max_calls:
                 _emit(
-                    progress_cb, calls_used=calls_used, calls_budget=scope.max_calls,
-                    candidates_total=len(race_map), candidates_checked=0,
-                    stage="capped", cursor="", capped=True,
+                    progress_cb,
+                    Coverage(
+                        result_sets_known=0, result_sets_checked=0, races_known=len(race_map),
+                        budget_limit=scope.max_calls, budget_used=calls_used,
+                        complete=False, index_built_at="", cursor="capped",
+                    ),
                 )
                 return _load_candidates(scope, race_map)
 
@@ -160,9 +231,12 @@ def candidate_result_sets(scope: SearchScope, progress_cb=None) -> list[dict]:
                 race_map[race["race_id"]] = race
 
             _emit(
-                progress_cb, calls_used=calls_used, calls_budget=scope.max_calls,
-                candidates_total=len(race_map), candidates_checked=0,
-                stage="races", cursor="", capped=False,
+                progress_cb,
+                Coverage(
+                    result_sets_known=0, result_sets_checked=0, races_known=len(race_map),
+                    budget_limit=scope.max_calls, budget_used=calls_used,
+                    complete=False, index_built_at="", cursor="",
+                ),
             )
 
             if len(races) < 1000:
@@ -224,9 +298,12 @@ def candidate_result_sets(scope: SearchScope, progress_cb=None) -> list[dict]:
             )
 
         _emit(
-            progress_cb, calls_used=calls_used, calls_budget=scope.max_calls,
-            candidates_total=found_result_sets, candidates_checked=0,
-            stage="catalog", cursor="", capped=False,
+            progress_cb,
+            Coverage(
+                result_sets_known=found_result_sets, result_sets_checked=0, races_known=len(race_map),
+                budget_limit=scope.max_calls, budget_used=calls_used,
+                complete=False, index_built_at="", cursor="",
+            ),
         )
 
         if len(rows) < rsu.RESULT_SET_CATALOG_PAGE_SIZE:
@@ -236,9 +313,12 @@ def candidate_result_sets(scope: SearchScope, progress_cb=None) -> list[dict]:
         hit_cap = True
 
     _emit(
-        progress_cb, calls_used=calls_used, calls_budget=scope.max_calls,
-        candidates_total=found_result_sets, candidates_checked=0,
-        stage="capped" if hit_cap else "done", cursor="", capped=hit_cap,
+        progress_cb,
+        Coverage(
+            result_sets_known=found_result_sets, result_sets_checked=0, races_known=len(race_map),
+            budget_limit=scope.max_calls, budget_used=calls_used,
+            complete=not hit_cap, index_built_at="", cursor="capped" if hit_cap else "",
+        ),
     )
     return _load_candidates(scope, race_map)
 
@@ -317,6 +397,192 @@ def dedupe_matches(matches: list[dict]) -> list[dict]:
     return [best[key] for key in order]
 
 
+def _index_built_at(scope: SearchScope) -> str:
+    """Freshest ``refreshed_at`` among this scope's indexed result sets.
+
+    "" means ``build_index`` has never covered this exact states/years
+    combination -- the honest answer for Coverage.index_built_at, since
+    there is nothing to report a date for.
+    """
+    rows = storage.load_result_set_catalog(scope.states, scope.start_year, scope.end_year)
+    timestamps = [row["refreshed_at"] for row in rows if row.get("refreshed_at")]
+    return max(timestamps) if timestamps else ""
+
+
+def indexed_candidates(scope: SearchScope, preferred_states: tuple[str, ...] = ()) -> list[dict]:
+    """Scope -> candidate result sets. SQLite read only, zero HTTP.
+
+    Only ``build_index`` writes the tables this reads -- a stale or empty
+    index here just means fewer (or no) candidates, never an HTTP call.
+
+    One row per ``(race_id, event_id)``: when an event published several
+    result sets (QA measured 3.7% do, with every finisher in every one),
+    the newest-modified is kept and the rest are dropped *before* any
+    ``get-results`` call is spent, rather than deduping the results after
+    paying for every duplicate.
+
+    Ranked: states in ``preferred_states`` (normally the states already in
+    the caller's tracker) first, then everything else; newest event date
+    first within each group. ``preferred_states`` defaults to empty, which
+    collapses to a single newest-first group.
+    """
+    rows = storage.load_result_set_catalog(scope.states, scope.start_year, scope.end_year)
+    if not rows:
+        return []
+
+    race_ids = {row["race_id"] for row in rows}
+    race_catalog = {race["race_id"]: race for race in storage.load_race_catalog(race_ids)}
+
+    best_by_event: dict[tuple, dict] = {}
+    for row in rows:
+        key = (row["race_id"], row["event_id"])
+        incumbent = best_by_event.get(key)
+        if incumbent is None or (row["last_modified_ts"] or 0) > (incumbent["last_modified_ts"] or 0):
+            best_by_event[key] = row
+
+    candidates = []
+    for (race_id, event_id), row in best_by_event.items():
+        race = race_catalog.get(race_id, {})
+        candidates.append(
+            {
+                "race_id": race_id,
+                "event_id": event_id,
+                "result_set_id": row["result_set_id"],
+                "race_name": row["race_name"],
+                "event_date": row["event_date"],
+                "state": row["state"],
+                "city": race.get("city", ""),
+                "url": race.get("url", ""),
+                "race_type": rsu.race_type_from_event_name(row["race_name"]),
+            }
+        )
+
+    preferred = {str(state).upper() for state in preferred_states}
+    candidates.sort(key=lambda candidate: candidate["event_date"], reverse=True)
+    candidates.sort(key=lambda candidate: 0 if candidate["state"] in preferred else 1)
+    return candidates
+
+
+def build_index(
+    states: tuple[str, ...],
+    start_year: int,
+    end_year: int,
+    budget: CallBudget,
+    progress_cb=None,
+) -> Coverage:
+    """CLI-only offline index builder -- not reachable from a page load.
+
+    Walks ``runsignup_results.search_races_in_window`` (adaptive date-window
+    splitting, never ``/races`` page >= 2 -- SPR-36) and the public
+    result-set catalog, writing both into the existing ``race_catalog`` /
+    ``result_set_catalog`` SQLite tables. A user's own search then reads
+    those tables through :func:`indexed_candidates` and makes zero
+    discovery HTTP calls -- this is the only place in the codebase that
+    walks ``/races`` or the catalog.
+    """
+    start_date, end_date = f"{int(start_year):04d}-01-01", f"{int(end_year):04d}-12-31"
+    race_map: dict[int, dict] = {}
+    races_capped = False
+
+    for state in states:
+        if budget.used >= budget.limit:
+            races_capped = True
+            break
+        for race in rsu.search_races_in_window(state, start_date, end_date, budget):
+            if not race["event_dates"]:
+                continue
+            race_map[race["race_id"]] = race
+        _emit(
+            progress_cb,
+            Coverage(
+                result_sets_known=0, result_sets_checked=0, races_known=len(race_map),
+                budget_limit=budget.limit, budget_used=budget.used,
+                complete=False, index_built_at="", cursor="",
+            ),
+        )
+        if budget.used >= budget.limit:
+            races_capped = True
+            break
+
+    if race_map:
+        storage.upsert_race_catalog(
+            [
+                {
+                    "race_id": race_id,
+                    "name": race["name"],
+                    "city": race["city"],
+                    "state": race["state"],
+                    "url": race["url"],
+                    "first_event_date": min(race["event_dates"]),
+                    "last_event_date": max(race["event_dates"]),
+                }
+                for race_id, race in race_map.items()
+            ]
+        )
+
+    # Same forward-from-watermark catalog walk as the pre-SPR-30
+    # candidate_result_sets, just spending from the shared budget instead of
+    # a call counter scoped to this function alone.
+    watermark = storage.catalog_watermark()
+    page = 1
+    found_result_sets = 0
+    catalog_capped = races_capped  # budget already gone; do not even start
+
+    while not catalog_capped:
+        if not budget.spend():
+            catalog_capped = True
+            break
+
+        rows = rsu.fetch_result_set_catalog(
+            modified_since_timestamp=watermark, page=page, results_per_page=rsu.RESULT_SET_CATALOG_PAGE_SIZE
+        )
+        if not rows:
+            break
+
+        in_scope = [row for row in rows if row["race_id"] in race_map]
+        if in_scope:
+            found_result_sets += len(in_scope)
+            storage.upsert_result_set_catalog(
+                [
+                    {
+                        **row,
+                        "event_date": min(race_map[row["race_id"]]["event_dates"]),
+                        "state": race_map[row["race_id"]]["state"],
+                    }
+                    for row in in_scope
+                ]
+            )
+
+        _emit(
+            progress_cb,
+            Coverage(
+                result_sets_known=found_result_sets, result_sets_checked=0, races_known=len(race_map),
+                budget_limit=budget.limit, budget_used=budget.used,
+                complete=False, index_built_at="", cursor="",
+            ),
+        )
+
+        if len(rows) < rsu.RESULT_SET_CATALOG_PAGE_SIZE:
+            break
+        page += 1
+
+    complete = not races_capped and not catalog_capped
+    scope = SearchScope(states=tuple(states), start_year=start_year, end_year=end_year, max_calls=budget.limit)
+    final_rows = storage.load_result_set_catalog(scope.states, scope.start_year, scope.end_year)
+    coverage = Coverage(
+        result_sets_known=len(final_rows),
+        result_sets_checked=0,
+        races_known=len(race_map),
+        budget_limit=budget.limit,
+        budget_used=budget.used,
+        complete=complete,
+        index_built_at=_index_built_at(scope),
+        cursor="capped" if not complete else "",
+    )
+    _emit(progress_cb, coverage)
+    return coverage
+
+
 def sweep_for_runner(
     first_name: str,
     last_name: str,
@@ -324,8 +590,13 @@ def sweep_for_runner(
     scope: SearchScope,
     progress_cb=None,
     resume_cursor: str = "",
-) -> tuple[list[dict], SearchProgress]:
+) -> tuple[list[dict], Coverage]:
     """One ``get-results`` call per candidate, name filters only.
+
+    Zero discovery HTTP calls -- ``candidates`` comes from
+    :func:`indexed_candidates`, a pure SQLite read. This is the only stage
+    left in the request path, so ``scope.max_calls`` is its *entire*
+    budget (SPR-41), spent through a single :class:`CallBudget`.
 
     Takes no DOB and no age. Age classification happens in the caller, not
     here -- see the module docstring's PRIVACY note.
@@ -336,18 +607,20 @@ def sweep_for_runner(
     total = len(candidates)
     index = min(_parse_cursor(resume_cursor), total)
     matches: list[dict] = []
-    calls_used = 0
+    budget = CallBudget(limit=scope.max_calls)
     capped = False
+    races_known = len({candidate["race_id"] for candidate in candidates})
+    built_at = _index_built_at(scope)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as executor:
         while index < total:
-            remaining_budget = scope.max_calls - calls_used
-            if remaining_budget <= 0:
+            batch_size = min(MAX_CONCURRENT_REQUESTS, total - index)
+            batch = [
+                candidate for candidate in candidates[index : index + batch_size] if budget.spend()
+            ]
+            if not batch:
                 capped = True
                 break
-
-            batch_size = min(MAX_CONCURRENT_REQUESTS, remaining_budget, total - index)
-            batch = candidates[index : index + batch_size]
 
             futures = {
                 executor.submit(
@@ -365,7 +638,6 @@ def sweep_for_runner(
 
             for future in concurrent.futures.as_completed(futures):
                 candidate = futures[future]
-                calls_used += 1
                 for raw in future.result():
                     if runner_matching.names_match(
                         first_name, last_name, raw.get("first_name", ""), raw.get("last_name", "")
@@ -376,26 +648,65 @@ def sweep_for_runner(
                         matches.append(row)
 
             index += len(batch)
+            if len(batch) < batch_size:
+                capped = True
+                break
+
             _emit(
-                progress_cb, calls_used=calls_used, calls_budget=scope.max_calls,
-                candidates_total=total, candidates_checked=index,
-                stage="sweep", cursor="", capped=False,
+                progress_cb,
+                Coverage(
+                    result_sets_known=total, result_sets_checked=index,
+                    races_known=races_known,
+                    budget_limit=budget.limit, budget_used=budget.used,
+                    complete=False, index_built_at=built_at, cursor="",
+                ),
             )
 
-    stage = "capped" if capped else "done"
-    cursor = str(index) if capped else ""
-    progress = SearchProgress(
-        calls_used=calls_used,
-        calls_budget=scope.max_calls,
-        candidates_total=total,
-        candidates_checked=index,
-        stage=stage,
-        cursor=cursor,
-        capped=capped,
+    coverage = Coverage(
+        result_sets_known=total,
+        result_sets_checked=index,
+        races_known=races_known,
+        budget_limit=budget.limit,
+        budget_used=budget.used,
+        complete=index >= total,
+        index_built_at=built_at,
+        cursor=str(index) if capped else "",
     )
-    _emit(
-        progress_cb, calls_used=progress.calls_used, calls_budget=progress.calls_budget,
-        candidates_total=progress.candidates_total, candidates_checked=progress.candidates_checked,
-        stage=progress.stage, cursor=progress.cursor, capped=progress.capped,
+    _emit(progress_cb, coverage)
+    return matches, coverage
+
+
+if __name__ == "__main__":
+    import argparse
+    import time
+
+    parser = argparse.ArgumentParser(
+        description="Build the offline race/result-set index (SPR-30). CLI only -- "
+        "never called from a page load."
     )
-    return matches, progress
+    parser.add_argument("--states", required=True, help="Comma-separated, e.g. MO,KS")
+    parser.add_argument("--start-year", type=int, required=True)
+    parser.add_argument("--end-year", type=int, required=True)
+    parser.add_argument("--max-calls", type=int, default=120)
+    args = parser.parse_args()
+
+    states = tuple(s.strip().upper() for s in args.states.split(",") if s.strip())
+    budget = CallBudget(limit=args.max_calls)
+
+    def _report(coverage: Coverage) -> None:
+        print(
+            f"  races_known={coverage.races_known} "
+            f"result_sets_known={coverage.result_sets_known} "
+            f"calls {coverage.budget_used}/{coverage.budget_limit}"
+        )
+
+    started = time.monotonic()
+    result = build_index(states, args.start_year, args.end_year, budget, progress_cb=_report)
+    elapsed = time.monotonic() - started
+
+    print(
+        f"\nIndexed {result.races_known} race(s), {result.result_sets_known} result set(s) "
+        f"for {states} {args.start_year}-{args.end_year}."
+    )
+    print(f"API calls: {result.budget_used}/{result.budget_limit}. Complete: {result.complete}.")
+    print(f"Wall clock: {elapsed:.1f}s. Index built at: {result.index_built_at or '(not recorded)'}")
