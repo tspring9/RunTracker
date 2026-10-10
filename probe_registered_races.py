@@ -67,10 +67,19 @@ def main() -> int:
     except oauth.OAuthConfigError as exc:
         print("Configuration problem:\n  %s" % exc, file=sys.stderr)
         print(
-            "\nFor a local run, create .streamlit/secrets.toml (already gitignored):\n"
-            '  RUNSIGNUP_OAUTH_CLIENT_ID = "..."\n'
-            '  RUNSIGNUP_OAUTH_CLIENT_SECRET = "..."\n'
-            '  RUNSIGNUP_OAUTH_REDIRECT_URI = "..."   # must match the registered URI exactly\n',
+            "\nEither source works -- Streamlit secrets are read first, then the "
+            "environment.\n"
+            "\n  Environment variables, for a one-off run. Nothing is written to disk:\n"
+            "    RUNSIGNUP_OAUTH_CLIENT_ID, RUNSIGNUP_OAUTH_CLIENT_SECRET,\n"
+            "    RUNSIGNUP_OAUTH_REDIRECT_URI\n"
+            "\n  .streamlit/secrets.toml (already gitignored), which also serves "
+            "`streamlit run`:\n"
+            '    RUNSIGNUP_OAUTH_CLIENT_ID = "..."\n'
+            '    RUNSIGNUP_OAUTH_CLIENT_SECRET = "..."\n'
+            '    RUNSIGNUP_OAUTH_REDIRECT_URI = "..."   # must match the registered URI exactly\n'
+            "\nSecrets set in the Streamlit Cloud dashboard live on Streamlit's "
+            "servers and are\nnot visible to this local script. Copy the values "
+            "across from the app's\nSettings -> Secrets page.\n",
             file=sys.stderr,
         )
         return 2

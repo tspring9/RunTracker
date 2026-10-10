@@ -79,8 +79,10 @@ def test_missing_config_exits_2_and_names_the_keys(monkeypatch, capsys):
     err = capsys.readouterr().err
     for name in SECRET_ENV:
         assert name in err
-    # Tells the user where to put them, not just that they are missing.
+    # Tells the user where to put them, not just that they are missing -- and offers
+    # both local sources, since Streamlit Cloud secrets are unreadable from a CLI.
     assert "secrets.toml" in err
+    assert "Environment variables" in err
 
 
 # -------------------------------------------------
