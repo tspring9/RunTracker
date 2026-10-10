@@ -13,8 +13,14 @@ and does the rest.
 
     python probe_registered_races.py
 
+Or double-click ``probe.cmd`` in this directory, which does the same thing without
+needing a terminal open at the right path.
+
 It prints a consent URL, you approve it in a browser, you paste back the URL you
-land on, and it prints the verdict.
+land on, and it prints the verdict. There is no setup step: if the OAuth app's
+client id, secret and redirect URI are not already in ``.streamlit/secrets.toml``
+or the environment, it asks for them, reading the secret through ``getpass`` so it
+is neither echoed nor left in shell history.
 
 The report it writes is **structural only** -- counts, a date range, and key
 names, with no race names or finish times -- so it is safe to paste into a ticket.
@@ -28,6 +34,7 @@ this process, and the refresh token is dropped by ``redeem_code`` on receipt.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 from datetime import date
@@ -37,6 +44,29 @@ import runsignup_oauth as oauth
 
 REPORT_FILENAME = "registered-races-probe-report.md"
 
+# Shorthands accepted at the redirect-URI prompt, so the common local value does
+# not have to be typed exactly. Anything else is taken verbatim -- RunSignUp
+# compares the registered URI literally, so guessing at corrections would turn a
+# typo into a confusing consent-screen failure.
+LOCALHOST_REDIRECT = "http://localhost:8501/"
+_REDIRECT_SHORTHANDS = {"localhost", "local", "1", "l"}
+
+_PROMPTS = {
+    "RUNSIGNUP_OAUTH_CLIENT_ID": (
+        "Client ID",
+        "From RunSignUp -> My Account -> API Keys, your registered OAuth application.",
+    ),
+    "RUNSIGNUP_OAUTH_CLIENT_SECRET": (
+        "Client secret",
+        "Not echoed as you type, and not stored anywhere by this script.",
+    ),
+    "RUNSIGNUP_OAUTH_REDIRECT_URI": (
+        "Redirect URI",
+        "Must match the one registered on the OAuth app exactly, trailing slash "
+        'included. Type "localhost" for %s.' % LOCALHOST_REDIRECT,
+    ),
+}
+
 
 def _parse_callback(pasted: str) -> dict:
     """Accept either the full redirect URL or a bare query string."""
@@ -45,6 +75,82 @@ def _parse_callback(pasted: str) -> dict:
         return {}
     query = urlparse(text).query if "?" in text or "://" in text else text
     return {key: values[0] for key, values in parse_qs(query).items() if values}
+
+
+def _clean(value: str) -> str:
+    """Strip whitespace and the quotes that come along with a copy-paste."""
+    return value.strip().strip('"').strip("'").strip()
+
+
+def _prompt_for_config(
+    values: dict,
+    *,
+    input_fn=input,
+    secret_input_fn=getpass.getpass,
+) -> oauth.OAuthConfig:
+    """Ask for whichever of the three values is missing, and return the config.
+
+    This exists because the setup step, not the OAuth flow, is what actually
+    trips people up: Streamlit *Cloud* secrets are invisible to a local process,
+    so "I already set the secrets" and "the probe can see them" are different
+    facts. Asking is also safer than the environment-variable route -- the secret
+    goes through ``getpass``, so it is neither echoed nor left in shell history.
+
+    Values already present in secrets or the environment are kept, not re-asked.
+    """
+    filled = dict(values)
+    for name in oauth.CONFIG_KEYS:
+        if filled.get(name):
+            continue
+        label, help_text = _PROMPTS[name]
+        print("\n%s\n  %s" % (label, help_text))
+        reader = secret_input_fn if name == "RUNSIGNUP_OAUTH_CLIENT_SECRET" else input_fn
+        entered = _clean(reader("  %s: " % label))
+        if name == "RUNSIGNUP_OAUTH_REDIRECT_URI" and entered.lower() in _REDIRECT_SHORTHANDS:
+            entered = LOCALHOST_REDIRECT
+        if not entered:
+            raise oauth.OAuthConfigError("No %s entered." % label.lower())
+        filled[name] = entered
+
+    return oauth.OAuthConfig(
+        client_id=filled["RUNSIGNUP_OAUTH_CLIENT_ID"],
+        client_secret=filled["RUNSIGNUP_OAUTH_CLIENT_SECRET"],
+        redirect_uri=filled["RUNSIGNUP_OAUTH_REDIRECT_URI"],
+    )
+
+
+def _load_config(interactive: bool) -> oauth.OAuthConfig:
+    """Config from secrets/env, falling back to prompting at a terminal.
+
+    Non-interactive callers (CI, a piped stdin, ``--no-prompt``) keep the old
+    behaviour of failing with the full "where to put these" message, since a
+    prompt nobody can answer would just hang.
+    """
+    values = oauth.configured_values()
+    if all(values[name] for name in oauth.CONFIG_KEYS):
+        return oauth.OAuthConfig(
+            client_id=values["RUNSIGNUP_OAUTH_CLIENT_ID"],
+            client_secret=values["RUNSIGNUP_OAUTH_CLIENT_SECRET"],
+            redirect_uri=values["RUNSIGNUP_OAUTH_REDIRECT_URI"],
+        )
+
+    if not interactive:
+        raise oauth.OAuthConfigError(
+            "Missing RunSignUp OAuth configuration: "
+            + ", ".join(name for name in oauth.CONFIG_KEYS if not values[name])
+        )
+
+    print("=" * 78)
+    print("Step 0 of 2 -- OAuth app credentials")
+    print("=" * 78)
+    print(
+        "\nNot found in .streamlit/secrets.toml or the environment, so I will ask.\n"
+        "Nothing you type here is written to disk or kept after this run.\n"
+        "\n(Secrets entered in the Streamlit Cloud dashboard live on Streamlit's\n"
+        "servers and are not readable by a local script like this one -- copy them\n"
+        "from the app's Settings -> Secrets page.)"
+    )
+    return _prompt_for_config(values)
 
 
 def main() -> int:
@@ -60,14 +166,24 @@ def main() -> int:
         help="write the raw JSON payload here for debugging. Contains your race "
         "history -- do not commit it or paste it into a ticket.",
     )
+    parser.add_argument(
+        "--no-prompt",
+        action="store_true",
+        help="fail instead of asking for credentials interactively",
+    )
     args = parser.parse_args()
 
+    interactive = not args.no_prompt and sys.stdin.isatty()
     try:
-        config = oauth.oauth_config()
-    except oauth.OAuthConfigError as exc:
+        config = _load_config(interactive)
+    except (oauth.OAuthConfigError, EOFError, KeyboardInterrupt) as exc:
+        if isinstance(exc, (EOFError, KeyboardInterrupt)):
+            print("\nCancelled.", file=sys.stderr)
+            return 1
         print("Configuration problem:\n  %s" % exc, file=sys.stderr)
         print(
-            "\nEither source works -- Streamlit secrets are read first, then the "
+            "\nRun this in a terminal and it will simply ask for the three values.\n"
+            "Otherwise, either source works -- Streamlit secrets are read first, then the "
             "environment.\n"
             "\n  Environment variables, for a one-off run. Nothing is written to disk:\n"
             "    RUNSIGNUP_OAUTH_CLIENT_ID, RUNSIGNUP_OAUTH_CLIENT_SECRET,\n"

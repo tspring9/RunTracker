@@ -123,6 +123,23 @@ def _secret(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+CONFIG_KEYS = (
+    "RUNSIGNUP_OAUTH_CLIENT_ID",
+    "RUNSIGNUP_OAUTH_CLIENT_SECRET",
+    "RUNSIGNUP_OAUTH_REDIRECT_URI",
+)
+
+
+def configured_values() -> dict[str, str]:
+    """The three config values as found in secrets/env, ``''`` where absent.
+
+    Exposed separately from :func:`oauth_config` so a caller can see *which*
+    values are missing without parsing an exception message. The probe uses this
+    to prompt for only the gaps.
+    """
+    return {name: _secret(name) for name in CONFIG_KEYS}
+
+
 def oauth_config() -> OAuthConfig:
     """Load the OAuth client configuration, or explain exactly what is missing.
 
@@ -132,19 +149,12 @@ def oauth_config() -> OAuthConfig:
     requires an *exact* match. A mismatch fails at the consent screen before any
     token exists, so it is worth being explicit about.
     """
-    client_id = _secret("RUNSIGNUP_OAUTH_CLIENT_ID")
-    client_secret = _secret("RUNSIGNUP_OAUTH_CLIENT_SECRET")
-    redirect_uri = _secret("RUNSIGNUP_OAUTH_REDIRECT_URI")
+    values = configured_values()
+    client_id = values["RUNSIGNUP_OAUTH_CLIENT_ID"]
+    client_secret = values["RUNSIGNUP_OAUTH_CLIENT_SECRET"]
+    redirect_uri = values["RUNSIGNUP_OAUTH_REDIRECT_URI"]
 
-    missing = [
-        name
-        for name, value in (
-            ("RUNSIGNUP_OAUTH_CLIENT_ID", client_id),
-            ("RUNSIGNUP_OAUTH_CLIENT_SECRET", client_secret),
-            ("RUNSIGNUP_OAUTH_REDIRECT_URI", redirect_uri),
-        )
-        if not value
-    ]
+    missing = [name for name in CONFIG_KEYS if not values[name]]
     if missing:
         raise OAuthConfigError(
             "Missing RunSignUp OAuth configuration: "

@@ -71,6 +71,8 @@ def _paste_callback_from_stdout(monkeypatch, capsys, redirect="http://localhost:
 # Configuration
 # -------------------------------------------------
 def test_missing_config_exits_2_and_names_the_keys(monkeypatch, capsys):
+    # Non-interactive (pytest's stdin is not a tty), so it must fail with guidance
+    # rather than block on a prompt nobody can answer.
     for name in SECRET_ENV:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("sys.argv", ["probe_registered_races.py"])
@@ -83,6 +85,115 @@ def test_missing_config_exits_2_and_names_the_keys(monkeypatch, capsys):
     # both local sources, since Streamlit Cloud secrets are unreadable from a CLI.
     assert "secrets.toml" in err
     assert "Environment variables" in err
+
+
+def test_no_prompt_flag_fails_even_at_a_terminal(monkeypatch, capsys):
+    for name in SECRET_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.argv", ["probe_registered_races.py", "--no-prompt"])
+
+    assert probe.main() == 2
+    assert "RUNSIGNUP_OAUTH_CLIENT_ID" in capsys.readouterr().err
+
+
+def test_interactive_run_asks_for_credentials_instead_of_failing(
+    in_tmp_cwd, monkeypatch, capsys
+):
+    # The setup step is what actually blocked this probe, so a terminal run must
+    # be able to complete with nothing configured up front.
+    for name in SECRET_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        probe, "_prompt_for_config",
+        lambda values, **kw: oauth.OAuthConfig("cid", "csecret", "http://localhost:8501/"),
+    )
+    _stub_flow(monkeypatch, {"races": [{"race": {"race_id": 1, "next_date": "5/1/2022"}}]})
+    _paste_callback_from_stdout(monkeypatch, capsys)
+    monkeypatch.setattr("sys.argv", ["probe_registered_races.py"])
+
+    assert probe.main() == 0
+    assert "Past races ARE returned" in capsys.readouterr().out
+
+
+def test_prompt_only_asks_for_what_is_missing_and_hides_the_secret(capsys):
+    # A client id already in secrets must not be re-asked, and the secret must go
+    # through the non-echoing reader rather than plain input().
+    asked, secret_asked = [], []
+
+    config = probe._prompt_for_config(
+        {
+            "RUNSIGNUP_OAUTH_CLIENT_ID": "already-set",
+            "RUNSIGNUP_OAUTH_CLIENT_SECRET": "",
+            "RUNSIGNUP_OAUTH_REDIRECT_URI": "",
+        },
+        input_fn=lambda prompt="": (asked.append(prompt), "  https://deployed/  ")[1],
+        secret_input_fn=lambda prompt="": (secret_asked.append(prompt), "typed-secret")[1],
+    )
+
+    assert config.client_id == "already-set"
+    assert config.client_secret == "typed-secret"
+    # Quotes and whitespace from a copy-paste are stripped.
+    assert config.redirect_uri == "https://deployed/"
+    assert len(asked) == 1 and len(secret_asked) == 1
+    # The secret is never echoed back to the terminal.
+    assert "typed-secret" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("typed", ["localhost", "LOCALHOST", "local", "1"])
+def test_localhost_shorthand_expands_at_the_redirect_prompt(typed):
+    config = probe._prompt_for_config(
+        {
+            "RUNSIGNUP_OAUTH_CLIENT_ID": "cid",
+            "RUNSIGNUP_OAUTH_CLIENT_SECRET": "sec",
+            "RUNSIGNUP_OAUTH_REDIRECT_URI": "",
+        },
+        input_fn=lambda prompt="": typed,
+    )
+    assert config.redirect_uri == probe.LOCALHOST_REDIRECT
+
+
+def test_a_pasted_redirect_uri_is_taken_verbatim():
+    # RunSignUp compares the registered URI literally, so no normalising: adding
+    # or removing a trailing slash here would fail at the consent screen with
+    # RunSignUp's error rather than ours.
+    config = probe._prompt_for_config(
+        {
+            "RUNSIGNUP_OAUTH_CLIENT_ID": "cid",
+            "RUNSIGNUP_OAUTH_CLIENT_SECRET": "sec",
+            "RUNSIGNUP_OAUTH_REDIRECT_URI": "",
+        },
+        input_fn=lambda prompt="": "https://runtracker.streamlit.app",
+    )
+    assert config.redirect_uri == "https://runtracker.streamlit.app"
+
+
+def test_an_empty_answer_at_the_prompt_is_an_error_not_an_empty_credential():
+    with pytest.raises(oauth.OAuthConfigError):
+        probe._prompt_for_config(
+            {
+                "RUNSIGNUP_OAUTH_CLIENT_ID": "",
+                "RUNSIGNUP_OAUTH_CLIENT_SECRET": "sec",
+                "RUNSIGNUP_OAUTH_REDIRECT_URI": "http://localhost:8501/",
+            },
+            input_fn=lambda prompt="": "",
+        )
+
+
+def test_cancelling_the_credential_prompt_exits_1(monkeypatch, capsys):
+    for name in SECRET_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    def cancel(values, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(probe, "_prompt_for_config", cancel)
+    monkeypatch.setattr("sys.argv", ["probe_registered_races.py"])
+
+    assert probe.main() == 1
+    assert "Cancelled" in capsys.readouterr().err
 
 
 # -------------------------------------------------

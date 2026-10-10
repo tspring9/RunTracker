@@ -245,18 +245,32 @@ client-side workaround — no credential in `st.secrets` can stand in for the ac
 consent. So this step is irreducibly manual. The probe exists to make it as small as possible.
 
 ```
-python probe_registered_races.py
+python probe_registered_races.py      # or: double-click probe.cmd
 ```
 
-On your own machine, in a terminal, from a checkout of this branch — it is a local CLI, not
-something the deployed app runs. Two consequences worth stating, because both have caught us:
+On your own machine — it is a local CLI, not something the deployed app runs. Everything else
+it needs, it asks for, because **the setup step was what actually blocked this, not the OAuth
+flow**. Two rounds of back-and-forth went on "where do I run this" and "which secrets does it
+read", so both are now answered by the program rather than by instructions:
 
-- **The branch is not merged**, so `main` does not contain the script. Run it from a checkout of
-  `feature/spr-20-oauth-design`.
-- **Streamlit Cloud secrets are server-side.** Values entered in the Streamlit dashboard are not
-  readable by a local process, so the probe needs the three values locally — as environment
-  variables for a one-off (nothing written to disk) or in `.streamlit/secrets.toml`. Streamlit
-  secrets are consulted first, then the environment.
+- **`probe.cmd` removes the `cd`.** Double-clicking it in Explorer sets the working directory to
+  its own location, so the import resolves and the report lands beside the script. It also
+  `pause`s at the end, or a double-click would flash the verdict up and vanish.
+- **Missing credentials are prompted for, not fatal.** At a terminal the probe asks for whichever
+  of the three values is absent, reading the client secret through `getpass` — so it is neither
+  echoed nor left in `ConsoleHost_history.txt`, which the environment-variable route could not
+  avoid. Piped or `--no-prompt` runs keep failing with the full "where to put these" message,
+  since a prompt nobody can answer would just hang.
+- **Streamlit Cloud secrets are server-side** and invisible to a local process; this is the trap
+  the prompt exists to defuse. Values live in `.streamlit/secrets.toml` or the environment
+  (secrets consulted first), and otherwise are typed in at the prompt.
+- **The branch is not merged**, so `main` does not contain the script. Use a checkout or worktree
+  of `feature/spr-20-oauth-connected-track`.
+
+At the redirect-URI prompt, `localhost` is accepted as shorthand for `http://localhost:8501/`.
+Anything else is taken **verbatim**: RunSignUp compares the registered URI literally, so
+"helpfully" adding or trimming a trailing slash would convert a typo into a consent-screen
+failure with RunSignUp's error message rather than ours.
 
 It prints a consent URL, you approve it, you paste back the URL you land on, and it prints the
 verdict. The landing page may 404 or fail to load — that is fine and expected, since what
