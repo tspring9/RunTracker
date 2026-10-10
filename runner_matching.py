@@ -378,3 +378,33 @@ def valid_email(value: str) -> bool:
     if not text:
         return False
     return bool(_EMAIL_RE.match(text))
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Exercise the SPR-31 matching contract from the command line."
+    )
+    parser.add_argument("--dob", required=True, help="Date of birth, YYYY-MM-DD")
+    parser.add_argument("--event-date", default="", help="Race date, YYYY-MM-DD; omit for 'race date unknown'")
+    parser.add_argument("--raw-age", default="", help="Published age, e.g. 40; omit for 'no usable age'")
+    parser.add_argument("--query-first", required=True)
+    parser.add_argument("--query-last", required=True)
+    parser.add_argument("--result-first", required=True)
+    parser.add_argument("--result-last", required=True)
+    args = parser.parse_args()
+
+    signal = name_agreement(args.query_first, args.query_last, args.result_first, args.result_last)
+    if signal == "none":
+        print("not a row: names do not agree")
+    else:
+        dob_value = date.fromisoformat(args.dob)
+        event_value = date.fromisoformat(args.event_date) if args.event_date else None
+        verdict = classify_match(dob_value, event_value, args.raw_age or None, signal)
+        print(f"bucket:           {verdict.bucket}")
+        print(f"reason:           {verdict.reason}")
+        print(f"name_signal:      {verdict.name_signal}")
+        print(f"age_signal:       {verdict.age_signal}")
+        print(f"result_age:       {verdict.result_age}")
+        print(f"age_on_race_date: {verdict.age_on_race_date}")
