@@ -30,6 +30,8 @@ first step cheap enough to be usable.
 | `/rest/v2/results/updated-result-sets.json` | **HTTP 200 with no credentials.** Public catalog of result sets: `race_id`, `event_id`, `individual_result_set_id`, `race_name`, `last_modified_ts`. 5,000 rows/page; 12,534 rows modified in the trailing 30 days; non-empty at page 80, empty at page 100 → **~400–500 k rows** total |
 | `/rest/user/registered-races` | HTTP 200 `{"error_code":7,"Permission Denied"}` — exists, needs user credentials |
 | `/rest/login` | Exists; POST-only (GET → error code 2) |
+| Result sets per event | Of **1,913** distinct events in a catalog sample, **70 (3.7%)** carry more than one result set — up to **4** on one event, with the same finisher present in all four (race 6606 / event 16127, sets 1313/1317/1334/1335) |
+| Published `age` values | Not sanitised by RunSignUp. A live result set carried **`age=952`** on 2026-10-09 |
 
 ### The find that made this feasible
 
@@ -39,6 +41,31 @@ first step cheap enough to be usable.
 feature exists to eliminate. Colorado 2026 the naive way is ~4,000–5,000 calls
 and 45+ minutes **before the first name lookup**. With the catalog, the same
 narrowing costs ~2 calls. That is the roughly 10× reduction the design rests on.
+
+### One event, several result sets
+
+The catalog's unit is the *result set*, not the race, and a single event is
+routinely published several times — Overall, Age Group, gender splits — with
+every finisher appearing in each copy. Two consequences:
+
+1. **Cost.** The sweep is one call per candidate *result set*, so the ~3.7% of
+   events that carry extras cost proportionally more calls than a
+   one-set-per-event model would predict. The budget below is measured against
+   real catalog rows, so it already includes this.
+2. **Correctness.** Uncollapsed, one race of the user's arrives as up to four
+   identical rows, each with its own "This is me" button — which would write
+   the same finish into the tracker four times. `results_search.dedupe_matches`
+   collapses on `(race_id, event_id, bib)`, falling back to name + age + finish
+   time when no bib is published so that two genuine same-name runners in one
+   event stay apart rather than one being silently dropped. Where copies
+   differ, the one carrying a usable age wins — age is the only signal that can
+   lift a row out of "Possible". The de-duplication runs in the caller, not in
+   `sweep_for_runner`, because only the caller sees the list *accumulated*
+   across resumed sweeps; a per-call dedupe would miss duplicates straddling
+   the call cap.
+
+This was found by the board's own verification of the first build, not by the
+build — the symptom reported was "a bunch of other races too."
 
 ## Options evaluated
 
@@ -186,6 +213,36 @@ race into your history is much worse than one extra click.
 A Feb-29 birthday resolves to Mar 1 in non-leap years — the leap birthday is
 held open through Feb 28 rather than credited a day early. A race held exactly
 on the birthday counts as the new age. Both are tested.
+
+**Implausible published ages count as missing, not as a mismatch.** RunSignUp
+does not sanitise this field — `age=952` is in a live result set (see the
+measurements table). Compared literally against a real age of 40 that
+classifies the row **Rejected** "off by 912 years" and collapses a result that
+may genuinely be the user's. `runner_matching.parse_result_age` therefore
+treats anything outside `1..120` as absent, routing the row to **Possible**,
+which is the honest verdict for an unusable age. Pinned to that real record in
+the tests.
+
+## Reading the results list
+
+Every row in the list shares the searched name by construction, so the UI has
+to make *which person* legible rather than assume it:
+
+- Each row shows the name exactly as RunSignUp published it, plus hometown and
+  bib — hometown being the only other identifying field available, and usually
+  what settles "that is not me" at a glance.
+- **Possible is collapsed by default**, alongside Rejected. Most Possible rows
+  are results published without a usable age, i.e. precisely the case where a
+  same-name stranger cannot be told apart from the user by the one signal there
+  is. Expanded, they bury the High-confidence rows that are actually theirs.
+- A caption reports how many duplicate rows were collapsed, so the count never
+  silently shrinks.
+
+The residual limit is real and worth stating: if someone shares the first *and*
+last name and is within a year of the same age, nothing in the published data
+separates them. That is why nothing enters the tracker without an explicit
+"This is me". If namesakes still crowd the list, the next available lever is
+filtering on hometown.
 
 ## Sources
 
