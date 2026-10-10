@@ -257,3 +257,178 @@ def test_get_reports_bad_registration_distinctly(monkeypatch):
 
     with pytest.raises(rsu.RunSignUpRegistrationError):
         rsu.fetch_race(85066)
+
+
+# -------------------------------------------------
+# probe_data_window
+# -------------------------------------------------
+# The probe exists to answer, empirically, whether RunSignUp's documented
+# "one year back" data limit applies to the public results endpoints -- and
+# whether registering changes that. These tests do not check the answer (it
+# comes from the live API); they check that the probe would report a narrowed
+# window honestly instead of hiding it behind a skipped year.
+def _fake_race(years, race_name="Probe Race"):
+    """A race whose events are one non-virtual 5K per year in ``years``."""
+    return {
+        "race_id": 1,
+        "name": race_name,
+        "address": {"city": "Kansas City", "state": "MO"},
+        "events": [
+            {
+                "event_id": 1000 + year,
+                "race_event_days_id": 2000 + year,
+                "name": "5K",
+                "start_time": f"06/01/{year} 07:00",
+            }
+            for year in years
+        ],
+    }
+
+
+@pytest.fixture
+def probe_api(monkeypatch):
+    """Stub the three endpoints probe_data_window walks. Returns a recorder."""
+
+    state = {"years_with_results": set(), "race": _fake_race([]), "result_calls": []}
+
+    def fake_fetch_race(race_id):
+        return state["race"]
+
+    def fake_list_result_sets(race_id, event_id):
+        year = event_id - 1000
+        if year not in state["years_with_results"]:
+            return []
+        return [{"result_set_id": 7, "name": "Overall", "public": True, "preliminary": False}]
+
+    def fake_fetch_results(race_id, event_id, result_set_id, **kwargs):
+        state["result_calls"].append(event_id)
+        return [{"first_name": "A", "last_name": "B", "chip_time": "25:00"}]
+
+    monkeypatch.setattr(rsu, "fetch_race", fake_fetch_race)
+    monkeypatch.setattr(rsu, "list_result_sets", fake_list_result_sets)
+    monkeypatch.setattr(rsu, "fetch_results", fake_fetch_results)
+    return state
+
+
+def test_probe_reports_full_history_when_available(probe_api):
+    probe_api["race"] = _fake_race([2022, 2023, 2024, 2025, 2026])
+    probe_api["years_with_results"] = {2022, 2023, 2024, 2025, 2026}
+
+    report = rsu.probe_data_window(race_id=1)
+
+    assert [probe["year"] for probe in report["probes"]] == [2026, 2025, 2024, 2023, 2022]
+    assert all(probe["status"] == "ok" for probe in report["probes"])
+    assert report["oldest_retrievable_date"] == "2022-06-01"
+    # Well past a year, i.e. the documented limit is not being applied here.
+    assert report["days_back"] > 365
+
+
+def test_probe_reports_a_one_year_window(probe_api):
+    """The outcome we are actually watching for: history clipped to 12 months."""
+    probe_api["race"] = _fake_race([2022, 2023, 2024, 2025, 2026])
+    probe_api["years_with_results"] = {2026}
+
+    report = rsu.probe_data_window(race_id=1)
+
+    assert report["oldest_retrievable_date"] == "2026-06-01"
+    assert report["days_back"] < 400
+    # The walled-off years are still listed, so the shape of the limit is
+    # visible rather than silently absent from the report.
+    assert [probe["status"] for probe in report["probes"]] == [
+        "ok",
+        "no-public-result-set",
+        "no-public-result-set",
+        "no-public-result-set",
+        "no-public-result-set",
+    ]
+
+
+def test_probe_records_oldest_listed_event_separately(probe_api):
+    """Listed-but-unretrievable history is the main false-positive risk.
+
+    Hospital Hill lists events back to 2011 but publishes no result sets
+    before 2024, which looks identical to an API window. Keeping both numbers
+    means the report cannot be misread as "the limit is 2.4 years".
+    """
+    probe_api["race"] = _fake_race([2011, 2025, 2026])
+    probe_api["years_with_results"] = {2025, 2026}
+
+    report = rsu.probe_data_window(race_id=1)
+
+    assert report["oldest_event_date"] == "2011-06-01"
+    assert report["oldest_retrievable_date"] == "2025-06-01"
+
+
+def test_probe_is_bounded_by_max_years(probe_api):
+    probe_api["race"] = _fake_race(range(2011, 2027))
+    probe_api["years_with_results"] = set(range(2011, 2027))
+
+    report = rsu.probe_data_window(race_id=1, max_years=3)
+
+    assert [probe["year"] for probe in report["probes"]] == [2026, 2025, 2024]
+
+
+def test_probe_skips_virtual_events(probe_api):
+    race = _fake_race([2026])
+    race["events"].insert(0, {
+        "event_id": 9999,
+        "race_event_days_id": 9999,
+        "name": "Virtual 5K",
+        "start_time": "06/01/2026 07:00",
+    })
+    probe_api["race"] = race
+    probe_api["years_with_results"] = {2026, 8999}
+
+    report = rsu.probe_data_window(race_id=1)
+
+    # 8999 == 9999 - 1000, i.e. the virtual event, which must not be probed.
+    assert probe_api["result_calls"] == [3026]
+
+
+def test_probe_tolerates_per_event_errors(probe_api, monkeypatch):
+    """One dud event must not abort the whole probe."""
+    probe_api["race"] = _fake_race([2025, 2026])
+    probe_api["years_with_results"] = {2025, 2026}
+
+    def flaky_list_result_sets(race_id, event_id):
+        if event_id == 3026:
+            raise rsu.RunSignUpError("RunSignUp HTTP 404 for /race/1/results/get-result-sets")
+        return [{"result_set_id": 7, "name": "Overall", "public": True, "preliminary": False}]
+
+    monkeypatch.setattr(rsu, "list_result_sets", flaky_list_result_sets)
+
+    report = rsu.probe_data_window(race_id=1)
+
+    statuses = {probe["year"]: probe["status"] for probe in report["probes"]}
+    assert statuses[2026] == "error"
+    assert statuses[2025] == "ok"
+    assert report["oldest_retrievable_date"] == "2025-06-01"
+
+
+def test_probe_lets_registration_errors_out(probe_api, monkeypatch):
+    """A rejected registration is config, not a data-window finding.
+
+    Swallowing it the way per-event errors are swallowed would render the
+    report as "no history available anywhere", which points at exactly the
+    wrong cause.
+    """
+    probe_api["race"] = _fake_race([2025, 2026])
+
+    def rejecting_list_result_sets(race_id, event_id):
+        raise rsu.RunSignUpRegistrationError("RunSignUp rejected our API caller registration")
+
+    monkeypatch.setattr(rsu, "list_result_sets", rejecting_list_result_sets)
+
+    with pytest.raises(rsu.RunSignUpRegistrationError):
+        rsu.probe_data_window(race_id=1)
+
+
+def test_probe_records_registration_state(probe_api, monkeypatch):
+    """So a before/after pair of reports can be told apart later."""
+    probe_api["race"] = _fake_race([2026])
+    probe_api["years_with_results"] = {2026}
+
+    assert rsu.probe_data_window(race_id=1)["registered"] is False
+
+    monkeypatch.setenv(rsu.API_REG_TOKEN_SETTING, "4242.abcdef")
+    assert rsu.probe_data_window(race_id=1)["registered"] is True

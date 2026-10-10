@@ -31,19 +31,24 @@ exactly as it did before, so local dev and the test suite keep working
 unauthenticated. That is deliberate -- it lets this plumbing merge well ahead
 of the deadline instead of being a flag-day change.
 
+See docs/runsignup-api-registration.md for where to put the two values and
+how to verify them.
+
 Two other limits from the same announcement, worth knowing before you add
 callers: the API allows only **2 concurrent calls** (everything here issues
 requests sequentially, so that is headroom, not a constraint -- but do not
 fan these calls out in threads), and data requests are documented as limited
-to **one year back**. Whether that one-year window is enforced on the public
-results endpoints is an open question; it has not bitten us because
-unregistered calls still return 2019 listings today.
+to **one year back**. That second one is not enforced on the public results
+endpoints as of 2026-10-09: ``--check-data-window`` pulled finisher rows from
+2.4 years back on an unregistered caller. See :func:`probe_data_window`, and
+re-run it registered to confirm the limit is not applied per-registration.
 
 Everything here is plain ``requests`` + dicts so it can be unit tested and run
 from the command line without Streamlit:
 
     python runsignup_results.py --race-id 85066 --last-name Springhower
     python runsignup_results.py --check-registration
+    python runsignup_results.py --check-data-window
 """
 
 from __future__ import annotations
@@ -624,6 +629,111 @@ def find_runner_results(
 
 
 # -------------------------------------------------
+# Data-window probe (the "one year back" question)
+# -------------------------------------------------
+# How many events to try per year before giving up on that year. Most race
+# years have several distances; the first few are enough to tell "this year is
+# retrievable" from "this year is walled off", and the cap keeps the probe from
+# fanning out into hundreds of calls on a long-running series.
+DATA_WINDOW_EVENTS_PER_YEAR = 6
+
+
+def probe_data_window(
+    race_id: int = HOSPITAL_HILL_RACE_ID,
+    max_years: int = 12,
+    events_per_year: int = DATA_WINDOW_EVENTS_PER_YEAR,
+) -> dict:
+    """Measure how far back RunSignUp actually serves results, year by year.
+
+    RunSignUp's API Developer Contract says data requests are limited to **one
+    year back**, but the published docs do not say whether that applies to the
+    public results endpoints -- and unregistered calls demonstrably return much
+    older seasons today. Rather than reason about it, this walks a real race's
+    history newest-to-oldest and records, per year, whether finisher rows can
+    still be pulled.
+
+    Run it before and after configuring registration: if the one-year limit is
+    enforced per-registration, the registered run's history collapses to the
+    last 12 months while the unregistered baseline does not. That comparison is
+    the whole point -- a single run in isolation proves nothing.
+
+    Read-only, and bounded to ``max_years`` years x ``events_per_year`` events.
+    """
+    token, secret = api_registration()
+    race = fetch_race(race_id)
+    events = [event for event in list_events(race_id, race) if event["date"]]
+
+    by_year: dict[int, list[dict]] = {}
+    for event in events:
+        by_year.setdefault(int(event["date"][:4]), []).append(event)
+
+    today = date.today()
+    probes = []
+    for year in sorted(by_year, reverse=True)[:max_years]:
+        candidates = [event for event in by_year[year] if not event["virtual"]]
+        candidates.sort(key=lambda event: event["date"], reverse=True)
+
+        probe = {
+            "year": year,
+            "date": candidates[0]["date"] if candidates else by_year[year][0]["date"],
+            "event_id": None,
+            "rows": 0,
+            "status": "no-public-result-set",
+            "detail": "",
+        }
+        for event in candidates[:events_per_year]:
+            try:
+                sets = [entry for entry in list_result_sets(race_id, event["event_id"]) if entry["public"]]
+            except RunSignUpRegistrationError:
+                # Never a data-window answer -- the config itself is rejected,
+                # so every row after this one would be noise. Let it out.
+                raise
+            except RunSignUpError as exc:
+                probe["status"] = "error"
+                probe["detail"] = str(exc)[:200]
+                continue
+            if not sets:
+                continue
+
+            probe["event_id"] = event["event_id"]
+            probe["date"] = event["date"]
+            try:
+                rows = fetch_results(
+                    race_id,
+                    event["event_id"],
+                    sets[0]["result_set_id"],
+                    results_per_page=1,
+                    max_pages=1,
+                )
+            except RunSignUpRegistrationError:
+                raise
+            except RunSignUpError as exc:
+                probe["status"] = "error"
+                probe["detail"] = str(exc)[:200]
+                break
+            probe["rows"] = len(rows)
+            probe["status"] = "ok" if rows else "empty"
+            probe["detail"] = ""
+            break
+        probes.append(probe)
+
+    retrievable = [probe for probe in probes if probe["status"] == "ok"]
+    oldest_retrievable = min((probe["date"] for probe in retrievable), default="")
+    oldest_event = min((event["date"] for event in events), default="")
+
+    return {
+        "race_id": race_id,
+        "race_name": race.get("name", ""),
+        "registered": bool(token or secret),
+        "probed_on": today.isoformat(),
+        "oldest_event_date": oldest_event,
+        "oldest_retrievable_date": oldest_retrievable,
+        "days_back": (today - date.fromisoformat(oldest_retrievable)).days if oldest_retrievable else 0,
+        "probes": probes,
+    }
+
+
+# -------------------------------------------------
 # Monetization: affiliate links
 # -------------------------------------------------
 def affiliate_race_url(race_url: str, affiliate_token: str = "") -> str:
@@ -659,6 +769,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Report the API caller registration config, make one live call, and exit.",
     )
+    parser.add_argument(
+        "--check-data-window",
+        action="store_true",
+        help="Probe how far back results are actually retrievable, and exit. "
+        "Run once unregistered and once registered, then compare.",
+    )
     args = parser.parse_args()
 
     if args.check_registration:
@@ -677,6 +793,37 @@ if __name__ == "__main__":
         except Exception as exc:  # noqa: BLE001 - CLI smoke test, report anything
             print(f"  live call FAILED: {type(exc).__name__}: {exc}")
             raise SystemExit(1)
+        raise SystemExit(0)
+
+    if args.check_data_window:
+        try:
+            report = probe_data_window(args.race_id)
+        except RunSignUpRegistrationError as exc:
+            # Config, not a data-window answer. A traceback here buries the
+            # one line that says what to fix.
+            print(f"Cannot probe the data window: {exc}")
+            raise SystemExit(1) from None
+        print(f"RunSignUp data window -- race {report['race_id']} {report['race_name']}")
+        print(f"  probed on:   {report['probed_on']}")
+        print(f"  registered:  {'yes' if report['registered'] else 'no (baseline)'}")
+        print(f"  oldest event RunSignUp lists: {report['oldest_event_date'] or '(none)'}")
+        for probe in report["probes"]:
+            marker = {"ok": "ok   ", "empty": "empty", "error": "ERROR"}.get(probe["status"], "none ")
+            print(f"  {probe['year']}  {marker}  {probe['date'] or '??????????'}  {probe['detail']}".rstrip())
+        if report["oldest_retrievable_date"]:
+            years = report["days_back"] / 365.25
+            print(
+                f"  oldest retrievable results:   {report['oldest_retrievable_date']} "
+                f"({report['days_back']} days / {years:.1f} years back)"
+            )
+            verdict = (
+                "one-year limit NOT enforced on these endpoints"
+                if report["days_back"] > 400
+                else "consistent with a one-year limit -- compare against the unregistered baseline"
+            )
+            print(f"  verdict: {verdict}")
+        else:
+            print("  no retrievable results in the probed range.")
         raise SystemExit(0)
 
     if args.list_sets or not (args.first_name or args.last_name):
