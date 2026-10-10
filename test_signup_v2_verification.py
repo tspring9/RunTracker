@@ -60,23 +60,18 @@ def test_unknown_age_and_unknown_race_date_have_truthful_distinct_reasons():
 
 def test_call_budget_is_atomic_under_the_two_request_sweep_concurrency():
     budget = search.CallBudget(limit=1)
+    start = Barrier(2)
 
-    class YieldingZero:
-        """Force both workers between CallBudget's read and write."""
+    def spend_together(_):
+        start.wait(timeout=10)
+        return budget.spend()
 
-        def __init__(self):
-            self.barrier = Barrier(2)
-
-        def __add__(self, amount):
-            self.barrier.wait(timeout=10)
-            return amount
-
-    budget.used = YieldingZero()
     with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(lambda _: budget.spend(), range(2)))
+        outcomes = list(pool.map(spend_together, range(2)))
 
     assert outcomes.count(True) == 1
     assert budget.used == budget.limit
+    assert hasattr(budget, "_lock"), "CallBudget needs an explicit synchronization primitive"
 
 
 def test_qa_controlled_cap_shape_cannot_recreate_401_calls(monkeypatch):
