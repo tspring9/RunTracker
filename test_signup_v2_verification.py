@@ -1,0 +1,197 @@
+"""Independent acceptance tests for the SPR-26 signup-search v2 contract.
+
+These tests intentionally exercise public contracts rather than mirror the
+implementation.  All identities are synthetic aliases.
+"""
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date
+import ast
+from pathlib import Path
+from threading import Barrier
+from unittest.mock import Mock
+
+import pytest
+
+import results_search as search
+import runner_matching as matching
+import runsignup_results as rsu
+
+
+@pytest.mark.parametrize(
+    "case,dob,name_signal,event_date,raw_age,expected_bucket,expected_age_signal",
+    [
+        ("no name agreement", date(1981, 3, 7), "none", date(2014, 3, 7), 33, None, None),
+        ("race before DOB", date(2020, 1, 1), "exact", date(2014, 3, 7), 33, matching.IMPOSSIBLE, None),
+        ("exact and corroborated", date(1990, 1, 1), "exact", date(2020, 1, 1), 30, matching.CERTAIN, "corroborated"),
+        ("exact and unknown age", date(1990, 1, 1), "exact", date(2020, 1, 1), 952, matching.MAYBE, "unknown"),
+        ("exact and contradicted", date(1990, 1, 1), "exact", date(2020, 1, 1), 28, matching.RULED_OUT, "contradicted"),
+        ("nickname and corroborated", date(1990, 1, 1), "nickname", date(2020, 1, 1), 30, matching.MAYBE, "corroborated"),
+        ("initial and unknown age", date(1990, 1, 1), "initial", date(2020, 1, 1), None, matching.MAYBE, "unknown"),
+        ("nickname and contradicted", date(1990, 1, 1), "nickname", date(2020, 1, 1), 28, matching.RULED_OUT, "contradicted"),
+        ("unknown race date", date(1990, 1, 1), "exact", None, 30, matching.MAYBE, "no-race-date"),
+    ],
+)
+def test_plan_decision_table_cell_by_cell(
+    case, dob, name_signal, event_date, raw_age, expected_bucket, expected_age_signal
+):
+    # The first row is the name gate: classify_match must not manufacture a
+    # confirmable verdict for something name_agreement already discarded.
+    if name_signal == "none":
+        assert matching.name_agreement("Runner", "A", "Runner", "B") == "none"
+        return
+
+    verdict = matching.classify_match(dob, event_date, raw_age, name_signal)
+    assert verdict.bucket == expected_bucket, case
+    if expected_age_signal is not None:
+        assert verdict.age_signal == expected_age_signal, case
+
+
+def test_unknown_age_and_unknown_race_date_have_truthful_distinct_reasons():
+    unknown_age = matching.classify_match(
+        date(1990, 1, 1), date(2020, 1, 1), 952, "exact"
+    )
+    unknown_date = matching.classify_match(date(1990, 1, 1), None, 30, "exact")
+
+    assert unknown_age.reason != unknown_date.reason
+    assert "age" in unknown_age.reason.lower()
+    assert "when" in unknown_date.reason.lower()
+
+
+def test_call_budget_is_atomic_under_the_two_request_sweep_concurrency():
+    budget = search.CallBudget(limit=1)
+
+    class YieldingZero:
+        """Force both workers between CallBudget's read and write."""
+
+        def __init__(self):
+            self.barrier = Barrier(2)
+
+        def __add__(self, amount):
+            self.barrier.wait(timeout=2)
+            return amount
+
+    budget.used = YieldingZero()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _: budget.spend(), range(2)))
+
+    assert outcomes.count(True) == 1
+    assert budget.used == budget.limit
+
+
+def test_qa_controlled_cap_shape_cannot_recreate_401_calls(monkeypatch):
+    """Reuse QA's 1 + 399 + 1 boundary counters without live calls.
+
+    Interactive discovery must now be SQLite-only, so the first two counters
+    remain zero; only the supplied result candidate can spend one HTTP call.
+    """
+    boundary_calls = {"races": 0, "catalog": 0, "results": 0}
+
+    def forbidden_races(*args, **kwargs):
+        boundary_calls["races"] += 1
+        raise AssertionError("interactive search called /races")
+
+    def forbidden_catalog(*args, **kwargs):
+        boundary_calls["catalog"] += 1
+        raise AssertionError("interactive search walked the catalog")
+
+    def runner_a_result(*args, **kwargs):
+        boundary_calls["results"] += 1
+        return []
+
+    monkeypatch.setattr(search.rsu, "search_races_by_state_range", forbidden_races)
+    monkeypatch.setattr(search.rsu, "fetch_result_set_catalog", forbidden_catalog)
+    monkeypatch.setattr(search.rsu, "fetch_results", runner_a_result)
+    scope = search.SearchScope(states=("MO",), start_year=2014, end_year=2014, max_calls=400)
+    qa_candidate = [{
+        "race_id": 6606, "event_id": 16127, "result_set_id": 1313,
+        "race_name": "QA controlled race", "event_date": "2014-03-07",
+        "state": "MO", "city": "", "url": "", "race_type": "5K",
+    }]
+
+    _, coverage = search.sweep_for_runner("Runner", "A", qa_candidate, scope)
+
+    assert boundary_calls == {"races": 0, "catalog": 0, "results": 1}
+    assert coverage.budget_used == 1 <= coverage.budget_limit
+    assert coverage.complete is True
+
+
+def test_capped_sweep_can_never_claim_complete(monkeypatch):
+    monkeypatch.setattr(search.rsu, "fetch_results", lambda *args, **kwargs: [])
+    candidates = [
+        {
+            "race_id": 1, "event_id": event_id, "result_set_id": event_id,
+            "race_name": f"Race {event_id}", "event_date": "2020-01-01",
+            "state": "MO", "city": "", "url": "", "race_type": "5K",
+        }
+        for event_id in (1, 2)
+    ]
+    _, coverage = search.sweep_for_runner(
+        "Runner", "A", candidates,
+        search.SearchScope(states=("MO",), start_year=2020, end_year=2020, max_calls=1),
+    )
+
+    assert coverage.result_sets_checked < coverage.result_sets_known
+    assert coverage.complete is False
+
+
+def test_race_window_transport_never_asks_for_page_two(monkeypatch):
+    pages = []
+
+    def full_then_empty(state, start_date, end_date, page=1, results_per_page=1000):
+        pages.append(page)
+        if len(pages) == 1:
+            return [
+                {"race_id": i, "name": "Race", "city": "", "state": state,
+                 "url": "", "event_dates": [start_date]}
+                for i in range(1000)
+            ]
+        return []
+
+    monkeypatch.setattr(rsu, "search_races_by_state_range", full_then_empty)
+    rsu.search_races_in_window(
+        "MO", "2020-01-01", "2020-12-31", search.CallBudget(limit=3)
+    )
+    assert pages and set(pages) == {1}
+
+
+@pytest.mark.parametrize(
+    "status,payload",
+    [
+        (200, ValueError("not json")),
+        (414, ValueError("URI too long")),
+        (200, {"error": {"error_code": 13, "error_msg": "You must be logged in"}}),
+    ],
+)
+def test_raw_upstream_body_never_escapes(monkeypatch, status, payload):
+    response = Mock(status_code=status, text="<html>nginx private upstream body</html>")
+    if isinstance(payload, Exception):
+        response.json.side_effect = payload
+    else:
+        response.json.return_value = payload
+    monkeypatch.setattr(rsu._SESSION, "get", Mock(return_value=response))
+
+    with pytest.raises(rsu.RunSignUpError) as exc:
+        rsu._get("/races", first_name="Runner")
+    message = str(exc.value).lower()
+    assert "<html>" not in message
+    assert "nginx" not in message
+    assert "logged in" not in message
+
+
+def test_no_streamlit_cache_data_function_accepts_dob_or_email():
+    tree = ast.parse(Path("app.py").read_text(encoding="utf-8"))
+    forbidden = {"dob", "date_of_birth", "birth_date", "email"}
+    violations = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        decorators = [ast.unparse(decorator) for decorator in node.decorator_list]
+        if not any("cache_data" in decorator for decorator in decorators):
+            continue
+        parameters = {argument.arg.lower() for argument in node.args.args}
+        if parameters & forbidden:
+            violations.append((node.name, sorted(parameters & forbidden)))
+
+    assert violations == []
