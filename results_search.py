@@ -44,7 +44,8 @@ press).
 from __future__ import annotations
 
 import concurrent.futures
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import runner_matching
@@ -62,16 +63,30 @@ class CallBudget:
     exceed ``limit`` -- so no caller can accidentally make a call the budget
     didn't authorize (SPR-41: two independently-tracked stage budgets
     together exceeded the advertised cap).
+
+    SPR-46: ``spend`` is called from the sweep's worker threads, so the
+    read-check-write has to be atomic as a whole -- a plain ``if`` guard
+    lets two concurrent callers both read ``used`` before either writes
+    it back, authorizing more than ``limit`` calls. Compare-and-swap under
+    a lock closes that window: the write only lands if nothing else moved
+    ``used`` since this call's read, otherwise it re-reads and retries.
     """
 
     limit: int
     used: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def spend(self, n: int = 1) -> bool:
-        if self.used + n > self.limit:
-            return False
-        self.used += n
-        return True
+        while True:
+            seen = self.used
+            candidate = seen + n
+            if candidate > self.limit:
+                return False
+            with self._lock:
+                if self.used != seen:
+                    continue
+                self.used = candidate
+                return True
 
 
 @dataclass
