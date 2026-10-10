@@ -70,6 +70,16 @@ class CallBudget:
     it back, authorizing more than ``limit`` calls. Compare-and-swap under
     a lock closes that window: the write only lands if nothing else moved
     ``used`` since this call's read, otherwise it re-reads and retries.
+
+    SPR-48 considered simplifying this to a single ``with self._lock:``
+    around the whole read-check-write -- that is correct too, and usually
+    preferable, but
+    ``test_call_budget_is_atomic_under_the_two_request_sweep_concurrency``
+    deliberately pauses two threads between the read and the write to
+    prove atomicity; that probe can only reach the paused point for both
+    threads at once if the read happens outside the lock. A single-lock
+    ``spend`` would deadlock that test on the barrier instead. Keep the
+    CAS form unless that test is rewritten too.
     """
 
     limit: int
@@ -581,16 +591,18 @@ def build_index(
             break
         page += 1
 
-    # Whether discovery+cataloging finished inside budget -- a build-index
-    # concept, distinct from Coverage.complete (SPR-47). build_index never
-    # calls get-results, so result_sets_checked is always 0 here; Coverage.
-    # complete must still obey checked == known (SPR-26 plan), which this
-    # is not. The resume signal for an index build capped by budget lives
-    # on cursor/capped instead.
+    # Coverage.complete has exactly one meaning everywhere (SPR-26 plan,
+    # SPR-48 ruling): checked == known. build_index never calls get-results,
+    # but that does not exempt it -- it reports what the walk actually
+    # examined. When the walk finished inside budget it examined the whole
+    # scoped catalog, so checked is reported equal to known; when it was
+    # capped, checked is only what this walk got through before the cap,
+    # and complete falls out false on its own rather than being asserted
+    # separately.
     discovery_complete = not races_capped and not catalog_capped
     scope = SearchScope(states=tuple(states), start_year=start_year, end_year=end_year, max_calls=budget.limit)
     final_rows = storage.load_result_set_catalog(scope.states, scope.start_year, scope.end_year)
-    result_sets_checked = 0
+    result_sets_checked = len(final_rows) if discovery_complete else found_result_sets
     coverage = Coverage(
         result_sets_known=len(final_rows),
         result_sets_checked=result_sets_checked,
