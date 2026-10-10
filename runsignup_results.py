@@ -11,14 +11,49 @@ Three things to know, because they are what blocked earlier attempts:
    needed for the registration-side endpoints, so the whole results feature
    works without secrets configured.
 
+API caller registration (hard deadline 2027-01-01)
+--------------------------------------------------
+Point 3 above stops being the whole story on **2027-01-01**. RunSignUp now
+requires every API caller to register, and from that date calls without a
+valid registration token are rejected -- including the unauthenticated public
+results calls this module makes today. See
+https://info.runsignup.com/2026/07/17/new-api-registration-requirements/
+
+Registration is free and is a *user* action (RunSignUp login -> API Keys ->
+"Register as an API caller"). It yields two values, which this module reads
+from Streamlit secrets or environment variables:
+
+    RUNSIGNUP_API_REG_TOKEN   -> sent as the ``rsu_api_reg`` GET parameter
+    RUNSIGNUP_API_REG_SECRET  -> sent as the ``X-RSU-API-REG-SECRET`` header
+
+Both are optional *until* the cutover: with neither set every call goes out
+exactly as it did before, so local dev and the test suite keep working
+unauthenticated. That is deliberate -- it lets this plumbing merge well ahead
+of the deadline instead of being a flag-day change.
+
+See docs/runsignup-api-registration.md for where to put the two values and
+how to verify them.
+
+Two other limits from the same announcement, worth knowing before you add
+callers: the API allows only **2 concurrent calls** (everything here issues
+requests sequentially, so that is headroom, not a constraint -- but do not
+fan these calls out in threads), and data requests are documented as limited
+to **one year back**. That second one is not enforced on the public results
+endpoints as of 2026-10-09: ``--check-data-window`` pulled finisher rows from
+2.4 years back on an unregistered caller. See :func:`probe_data_window`, and
+re-run it registered to confirm the limit is not applied per-registration.
+
 Everything here is plain ``requests`` + dicts so it can be unit tested and run
 from the command line without Streamlit:
 
     python runsignup_results.py --race-id 85066 --last-name Springhower
+    python runsignup_results.py --check-registration
+    python runsignup_results.py --check-data-window
 """
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Iterable
@@ -32,6 +67,21 @@ from urllib3.util.retry import Retry
 # -------------------------------------------------
 RESULTS_API_HOST = "https://runsignup.com/rest"
 DEFAULT_TIMEOUT = 30
+
+# -------------------------------------------------
+# API caller registration (see module docstring)
+# -------------------------------------------------
+# Wire names are fixed by RunSignUp; the *_SETTING names are ours.
+API_REG_TOKEN_PARAM = "rsu_api_reg"
+API_REG_SECRET_HEADER = "X-RSU-API-REG-SECRET"
+API_REG_TOKEN_SETTING = "RUNSIGNUP_API_REG_TOKEN"
+API_REG_SECRET_SETTING = "RUNSIGNUP_API_REG_SECRET"
+
+# The date unregistered calls start being rejected.
+API_REG_ENFORCEMENT_DATE = "2027-01-01"
+
+# RunSignUp's error_code for "Invalid API caller credentials." (HTTP 400).
+API_REG_INVALID_ERROR_CODE = 17
 
 # Hospital Hill Run -- the race we are building against first.
 HOSPITAL_HILL_RACE_ID = 85066
@@ -54,9 +104,123 @@ class RunSignUpError(RuntimeError):
     """Raised when RunSignUp returns an API-level error payload."""
 
 
+class RunSignUpRegistrationError(RunSignUpError):
+    """Raised when RunSignUp rejects our API caller registration.
+
+    A subclass of ``RunSignUpError`` so existing ``except RunSignUpError``
+    handlers keep working, but distinguishable because the fix is completely
+    different: this one is never transient and never about the race being
+    asked for -- it is bad config.
+    """
+
+
+# -------------------------------------------------
+# API caller registration config
+# -------------------------------------------------
+def _setting(name: str, default: str = "") -> str:
+    """Read a setting from Streamlit secrets first, then environment variables.
+
+    Same pattern as ``get_db_path`` in storage.py. Importing streamlit lazily
+    (and swallowing the failure) is what keeps this module usable from the CLI
+    and from pytest, where there is no Streamlit runtime at all.
+    """
+    try:
+        import streamlit as st
+
+        if name in st.secrets:
+            return str(st.secrets[name]).strip()
+    except Exception:
+        pass
+    return str(os.getenv(name, default)).strip()
+
+
+def api_registration() -> tuple[str, str]:
+    """``(token, secret)`` for this app's RunSignUp API caller registration.
+
+    ``("", "")`` means unregistered, which is still valid until
+    ``API_REG_ENFORCEMENT_DATE``.
+    """
+    return _setting(API_REG_TOKEN_SETTING), _setting(API_REG_SECRET_SETTING)
+
+
+def registration_notes() -> list[str]:
+    """Human-readable warnings about the current registration config.
+
+    Returned rather than logged so the CLI, app.py, and tests can each decide
+    how loudly to surface them.
+    """
+    token, secret = api_registration()
+    notes = []
+    if not token and not secret:
+        notes.append(
+            f"Not registered as a RunSignUp API caller. Calls still work today but are "
+            f"rejected from {API_REG_ENFORCEMENT_DATE}. Register (free) at RunSignUp -> "
+            f"API Keys -> 'Register as an API caller', then set {API_REG_TOKEN_SETTING} "
+            f"and {API_REG_SECRET_SETTING}."
+        )
+    elif not token:
+        notes.append(f"{API_REG_SECRET_SETTING} is set but {API_REG_TOKEN_SETTING} is missing; calls go out unregistered.")
+    elif not secret:
+        notes.append(f"{API_REG_TOKEN_SETTING} is set but {API_REG_SECRET_SETTING} is missing; RunSignUp will reject the token.")
+    elif "." not in token:
+        # Documented format is "<id>.<token>". Warn, don't block -- a format
+        # change on RunSignUp's side should not take the app down.
+        notes.append(f"{API_REG_TOKEN_SETTING} does not look like the documented '<id>.<token>' format.")
+    return notes
+
+
 # -------------------------------------------------
 # Low-level request helper
 # -------------------------------------------------
+def _apply_api_registration(session: requests.Session, params: dict) -> dict:
+    """Attach the API caller registration to one outgoing request.
+
+    A clean no-op when nothing is configured: no parameter, no header, and any
+    stale header from an earlier config is dropped. Called from ``_get`` (not
+    just ``_build_session``) because the module-level session is built at import
+    time, before Streamlit secrets are necessarily readable.
+    """
+    token, secret = api_registration()
+
+    if token:
+        params.setdefault(API_REG_TOKEN_PARAM, token)
+    if secret:
+        session.headers[API_REG_SECRET_HEADER] = secret
+    else:
+        session.headers.pop(API_REG_SECRET_HEADER, None)
+
+    return params
+
+
+def raise_for_bad_registration(response: requests.Response) -> None:
+    """Turn RunSignUp's registration rejection into an actionable error.
+
+    Verified live against both endpoints on 2026-10-09: sending a token that
+    RunSignUp does not recognise returns HTTP 400 with ``error_code`` 17,
+    ``"Invalid API caller credentials."`` -- on *every* call. So a mis-pasted
+    token is strictly worse than no token at all, and it must not be reported
+    as a generic "RunSignUp HTTP 400", which reads like a RunSignUp outage and
+    sends whoever is on call looking in the wrong place.
+    """
+    if response.status_code != 400:
+        return
+    try:
+        error = (response.json() or {}).get("error") or {}
+    except ValueError:
+        return
+    if error.get("error_code") != API_REG_INVALID_ERROR_CODE:
+        return
+
+    token, secret = api_registration()
+    reason = str(error.get("error_msg") or "invalid credentials").rstrip(".")
+    raise RunSignUpRegistrationError(
+        f"RunSignUp rejected our API caller registration: {reason}. "
+        f"Check {API_REG_TOKEN_SETTING} (currently {'set' if token else 'UNSET'}) and "
+        f"{API_REG_SECRET_SETTING} (currently {'set' if secret else 'UNSET'}) against RunSignUp -> API Keys. "
+        f"Clearing both restores unregistered access until {API_REG_ENFORCEMENT_DATE}."
+    )
+
+
 def _build_session() -> requests.Session:
     """Create a connection-pooled client with bounded transient retries."""
     retry = Retry(
@@ -72,6 +236,7 @@ def _build_session() -> requests.Session:
     session = requests.Session()
     session.headers.update({"User-Agent": "RunTracker/1.0 (+public RunSignUp client)"})
     session.mount("https://", adapter)
+    _apply_api_registration(session, {})
     return session
 
 
@@ -81,9 +246,11 @@ _SESSION = _build_session()
 def _get(path: str, **params) -> dict:
     """GET a RunSignUp REST path and raise on both HTTP and API-level errors."""
     params.setdefault("format", "json")
+    _apply_api_registration(_SESSION, params)
     response = _SESSION.get(f"{RESULTS_API_HOST}{path}", params=params, timeout=DEFAULT_TIMEOUT)
 
     if response.status_code != 200:
+        raise_for_bad_registration(response)
         raise RunSignUpError(f"RunSignUp HTTP {response.status_code} for {path}: {response.text[:500]}")
 
     payload = response.json()
@@ -462,6 +629,111 @@ def find_runner_results(
 
 
 # -------------------------------------------------
+# Data-window probe (the "one year back" question)
+# -------------------------------------------------
+# How many events to try per year before giving up on that year. Most race
+# years have several distances; the first few are enough to tell "this year is
+# retrievable" from "this year is walled off", and the cap keeps the probe from
+# fanning out into hundreds of calls on a long-running series.
+DATA_WINDOW_EVENTS_PER_YEAR = 6
+
+
+def probe_data_window(
+    race_id: int = HOSPITAL_HILL_RACE_ID,
+    max_years: int = 12,
+    events_per_year: int = DATA_WINDOW_EVENTS_PER_YEAR,
+) -> dict:
+    """Measure how far back RunSignUp actually serves results, year by year.
+
+    RunSignUp's API Developer Contract says data requests are limited to **one
+    year back**, but the published docs do not say whether that applies to the
+    public results endpoints -- and unregistered calls demonstrably return much
+    older seasons today. Rather than reason about it, this walks a real race's
+    history newest-to-oldest and records, per year, whether finisher rows can
+    still be pulled.
+
+    Run it before and after configuring registration: if the one-year limit is
+    enforced per-registration, the registered run's history collapses to the
+    last 12 months while the unregistered baseline does not. That comparison is
+    the whole point -- a single run in isolation proves nothing.
+
+    Read-only, and bounded to ``max_years`` years x ``events_per_year`` events.
+    """
+    token, secret = api_registration()
+    race = fetch_race(race_id)
+    events = [event for event in list_events(race_id, race) if event["date"]]
+
+    by_year: dict[int, list[dict]] = {}
+    for event in events:
+        by_year.setdefault(int(event["date"][:4]), []).append(event)
+
+    today = date.today()
+    probes = []
+    for year in sorted(by_year, reverse=True)[:max_years]:
+        candidates = [event for event in by_year[year] if not event["virtual"]]
+        candidates.sort(key=lambda event: event["date"], reverse=True)
+
+        probe = {
+            "year": year,
+            "date": candidates[0]["date"] if candidates else by_year[year][0]["date"],
+            "event_id": None,
+            "rows": 0,
+            "status": "no-public-result-set",
+            "detail": "",
+        }
+        for event in candidates[:events_per_year]:
+            try:
+                sets = [entry for entry in list_result_sets(race_id, event["event_id"]) if entry["public"]]
+            except RunSignUpRegistrationError:
+                # Never a data-window answer -- the config itself is rejected,
+                # so every row after this one would be noise. Let it out.
+                raise
+            except RunSignUpError as exc:
+                probe["status"] = "error"
+                probe["detail"] = str(exc)[:200]
+                continue
+            if not sets:
+                continue
+
+            probe["event_id"] = event["event_id"]
+            probe["date"] = event["date"]
+            try:
+                rows = fetch_results(
+                    race_id,
+                    event["event_id"],
+                    sets[0]["result_set_id"],
+                    results_per_page=1,
+                    max_pages=1,
+                )
+            except RunSignUpRegistrationError:
+                raise
+            except RunSignUpError as exc:
+                probe["status"] = "error"
+                probe["detail"] = str(exc)[:200]
+                break
+            probe["rows"] = len(rows)
+            probe["status"] = "ok" if rows else "empty"
+            probe["detail"] = ""
+            break
+        probes.append(probe)
+
+    retrievable = [probe for probe in probes if probe["status"] == "ok"]
+    oldest_retrievable = min((probe["date"] for probe in retrievable), default="")
+    oldest_event = min((event["date"] for event in events), default="")
+
+    return {
+        "race_id": race_id,
+        "race_name": race.get("name", ""),
+        "registered": bool(token or secret),
+        "probed_on": today.isoformat(),
+        "oldest_event_date": oldest_event,
+        "oldest_retrievable_date": oldest_retrievable,
+        "days_back": (today - date.fromisoformat(oldest_retrievable)).days if oldest_retrievable else 0,
+        "probes": probes,
+    }
+
+
+# -------------------------------------------------
 # Monetization: affiliate links
 # -------------------------------------------------
 def affiliate_race_url(race_url: str, affiliate_token: str = "") -> str:
@@ -492,7 +764,67 @@ if __name__ == "__main__":
     parser.add_argument("--last-name", default="")
     parser.add_argument("--include-virtual", action="store_true")
     parser.add_argument("--list-sets", action="store_true", help="List public result sets and exit.")
+    parser.add_argument(
+        "--check-registration",
+        action="store_true",
+        help="Report the API caller registration config, make one live call, and exit.",
+    )
+    parser.add_argument(
+        "--check-data-window",
+        action="store_true",
+        help="Probe how far back results are actually retrievable, and exit. "
+        "Run once unregistered and once registered, then compare.",
+    )
     args = parser.parse_args()
+
+    if args.check_registration:
+        token, secret = api_registration()
+        print("RunSignUp API caller registration")
+        # Only the id half of "<id>.<token>" is printed; never the secret.
+        print(f"  {API_REG_TOKEN_SETTING}:  {token.split('.')[0] + '.***' if token else '(unset)'}")
+        print(f"  {API_REG_SECRET_SETTING}: {'(set)' if secret else '(unset)'}")
+        print(f"  sending {API_REG_TOKEN_PARAM} param:        {'yes' if token else 'no'}")
+        print(f"  sending {API_REG_SECRET_HEADER} header: {'yes' if secret else 'no'}")
+        for note in registration_notes():
+            print(f"  ! {note}")
+        try:
+            race = fetch_race(args.race_id)
+            print(f"  live call OK: race {args.race_id} -> {race.get('name', '?')}")
+        except Exception as exc:  # noqa: BLE001 - CLI smoke test, report anything
+            print(f"  live call FAILED: {type(exc).__name__}: {exc}")
+            raise SystemExit(1)
+        raise SystemExit(0)
+
+    if args.check_data_window:
+        try:
+            report = probe_data_window(args.race_id)
+        except RunSignUpRegistrationError as exc:
+            # Config, not a data-window answer. A traceback here buries the
+            # one line that says what to fix.
+            print(f"Cannot probe the data window: {exc}")
+            raise SystemExit(1) from None
+        print(f"RunSignUp data window -- race {report['race_id']} {report['race_name']}")
+        print(f"  probed on:   {report['probed_on']}")
+        print(f"  registered:  {'yes' if report['registered'] else 'no (baseline)'}")
+        print(f"  oldest event RunSignUp lists: {report['oldest_event_date'] or '(none)'}")
+        for probe in report["probes"]:
+            marker = {"ok": "ok   ", "empty": "empty", "error": "ERROR"}.get(probe["status"], "none ")
+            print(f"  {probe['year']}  {marker}  {probe['date'] or '??????????'}  {probe['detail']}".rstrip())
+        if report["oldest_retrievable_date"]:
+            years = report["days_back"] / 365.25
+            print(
+                f"  oldest retrievable results:   {report['oldest_retrievable_date']} "
+                f"({report['days_back']} days / {years:.1f} years back)"
+            )
+            verdict = (
+                "one-year limit NOT enforced on these endpoints"
+                if report["days_back"] > 400
+                else "consistent with a one-year limit -- compare against the unregistered baseline"
+            )
+            print(f"  verdict: {verdict}")
+        else:
+            print("  no retrievable results in the probed range.")
+        raise SystemExit(0)
 
     if args.list_sets or not (args.first_name or args.last_name):
         sets = discover_result_sets(args.race_id, include_virtual=args.include_virtual)
