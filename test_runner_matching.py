@@ -90,9 +90,58 @@ def test_implausible_published_age_is_possible_not_rejected():
     assert "no age" in reason.lower()
 
 
+# -------------------------------------------------
+# normalize_name – signup input validators
+# -------------------------------------------------
 def test_normalize_name_casefolds_and_collapses_whitespace():
     assert matching.normalize_name("  Mary  Jane \t") == "mary jane"
     assert matching.names_match("thomas", "spring", "Thomas", "Spring")
+
+
+def test_normalize_name_empty_string():
+    assert matching.normalize_name("") == ""
+
+
+def test_normalize_name_only_whitespace():
+    assert matching.normalize_name("   ") == ""
+
+
+def test_normalize_name_one_character():
+    assert matching.normalize_name("A") == "a"
+
+
+def test_normalize_name_leading_trailing_spaces():
+    assert matching.normalize_name("  Hello  ") == "hello"
+
+
+def test_normalize_name_internal_double_spaces():
+    assert matching.normalize_name("First   Last") == "first last"
+
+
+def test_normalize_name_mixed_case():
+    assert matching.normalize_name("hElLo WoRLd") == "hello world"
+
+
+def test_normalize_name_apostrophe():
+    assert matching.normalize_name("O'Brien") == "o'brien"
+
+
+def test_normalize_name_hyphen():
+    assert matching.normalize_name("Smith-Jones") == "smith-jones"
+
+
+def test_normalize_name_accents():
+    assert matching.normalize_name("Núñez") == "núñez"
+
+
+def test_normalize_name_very_long_string():
+    long_name = "A" * 1000
+    assert matching.normalize_name(long_name) == long_name.lower()
+
+
+def test_normalize_name_none_safely():
+    # value or "" short-circuits None to empty string.
+    assert matching.normalize_name(None) == ""
 
 
 @pytest.mark.parametrize(
@@ -126,6 +175,26 @@ def test_valid_email_accepts_ordinary_addresses(value):
 @pytest.mark.parametrize("value", ["nope", "a@", "@b.com", "a b@c.com", ""])
 def test_valid_email_rejects_malformed_addresses(value):
     assert not matching.valid_email(value)
+
+
+def test_valid_email_rejects_double_at():
+    assert not matching.valid_email("a@@b.com")
+
+
+def test_valid_email_accepts_leading_space_after_strip():
+    assert matching.valid_email(" runner@example.com")
+
+
+def test_valid_email_accepts_trailing_space_after_strip():
+    assert matching.valid_email("runner@example.com ")
+
+
+def test_valid_email_rejects_empty_string():
+    assert not matching.valid_email("")
+
+
+def test_valid_email_rejects_none():
+    assert not matching.valid_email(None)
 
 
 def test_matching_module_has_no_network_or_persistence_imports():
