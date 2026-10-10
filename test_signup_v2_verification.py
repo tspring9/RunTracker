@@ -130,6 +130,36 @@ def test_capped_sweep_can_never_claim_complete(monkeypatch):
     assert coverage.complete is False
 
 
+def test_index_coverage_complete_obeys_checked_equals_known(monkeypatch):
+    """Coverage has one meaning in the plan, including from build_index."""
+    race = {
+        "race_id": 6606, "name": "QA controlled race", "city": "",
+        "state": "MO", "url": "", "event_dates": ["2014-03-07"],
+    }
+    result_set = {
+        "race_id": 6606, "event_id": 16127, "result_set_id": 1313,
+        "race_name": "QA controlled race", "event_date": "2014-03-07",
+        "state": "MO", "last_modified_ts": 1,
+        "refreshed_at": "2026-10-09T00:00:00+00:00",
+    }
+
+    def fake_window(state, start_date, end_date, budget):
+        assert budget.spend()
+        return [race]
+
+    catalog_pages = iter([[result_set], []])
+    monkeypatch.setattr(search.rsu, "search_races_in_window", fake_window)
+    monkeypatch.setattr(search.rsu, "fetch_result_set_catalog", lambda **kwargs: next(catalog_pages))
+    monkeypatch.setattr(search.storage, "catalog_watermark", lambda: 0)
+    monkeypatch.setattr(search.storage, "upsert_race_catalog", lambda rows: None)
+    monkeypatch.setattr(search.storage, "upsert_result_set_catalog", lambda rows: None)
+    monkeypatch.setattr(search.storage, "load_result_set_catalog", lambda *args: [result_set])
+
+    coverage = search.build_index(("MO",), 2014, 2014, search.CallBudget(limit=10))
+
+    assert coverage.complete is (coverage.result_sets_checked == coverage.result_sets_known)
+
+
 def test_race_window_transport_never_asks_for_page_two(monkeypatch):
     pages = []
 
