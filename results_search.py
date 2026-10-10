@@ -581,18 +581,25 @@ def build_index(
             break
         page += 1
 
-    complete = not races_capped and not catalog_capped
+    # Whether discovery+cataloging finished inside budget -- a build-index
+    # concept, distinct from Coverage.complete (SPR-47). build_index never
+    # calls get-results, so result_sets_checked is always 0 here; Coverage.
+    # complete must still obey checked == known (SPR-26 plan), which this
+    # is not. The resume signal for an index build capped by budget lives
+    # on cursor/capped instead.
+    discovery_complete = not races_capped and not catalog_capped
     scope = SearchScope(states=tuple(states), start_year=start_year, end_year=end_year, max_calls=budget.limit)
     final_rows = storage.load_result_set_catalog(scope.states, scope.start_year, scope.end_year)
+    result_sets_checked = 0
     coverage = Coverage(
         result_sets_known=len(final_rows),
-        result_sets_checked=0,
+        result_sets_checked=result_sets_checked,
         races_known=len(race_map),
         budget_limit=budget.limit,
         budget_used=budget.used,
-        complete=complete,
+        complete=result_sets_checked == len(final_rows),
         index_built_at=_index_built_at(scope),
-        cursor="capped" if not complete else "",
+        cursor="capped" if not discovery_complete else "",
     )
     _emit(progress_cb, coverage)
     return coverage
@@ -723,5 +730,5 @@ if __name__ == "__main__":
         f"\nIndexed {result.races_known} race(s), {result.result_sets_known} result set(s) "
         f"for {states} {args.start_year}-{args.end_year}."
     )
-    print(f"API calls: {result.budget_used}/{result.budget_limit}. Complete: {result.complete}.")
+    print(f"API calls: {result.budget_used}/{result.budget_limit}. Capped: {result.capped}.")
     print(f"Wall clock: {elapsed:.1f}s. Index built at: {result.index_built_at or '(not recorded)'}")

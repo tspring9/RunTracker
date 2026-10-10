@@ -443,7 +443,13 @@ class BuildIndexTests(unittest.TestCase):
 
         self.assertEqual(coverage.races_known, 1)
         self.assertEqual(coverage.result_sets_known, 1)
-        self.assertTrue(coverage.complete)
+        # build_index only discovers/catalogs -- it never calls get-results,
+        # so result_sets_checked is always 0 and Coverage.complete (checked
+        # == known, SPR-26) is false whenever anything was indexed. Whether
+        # the build itself finished inside budget is the separate `capped`
+        # concept (SPR-47).
+        self.assertFalse(coverage.complete)
+        self.assertFalse(coverage.capped)
         self.assertLessEqual(coverage.budget_used, coverage.budget_limit)
 
         candidates = search.indexed_candidates(
@@ -472,4 +478,7 @@ class BuildIndexTests(unittest.TestCase):
 
         self.assertLessEqual(budget.used, 3)
         self.assertEqual(coverage.budget_used, budget.used)
-        self.assertFalse(coverage.complete)
+        # Budget ran out before discovery finished -- that is `capped`, not
+        # `complete` (SPR-47): nothing was checked either way, so checked
+        # == known == 0 here regardless of the cap.
+        self.assertTrue(coverage.capped)
