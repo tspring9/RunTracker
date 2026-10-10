@@ -248,6 +248,16 @@ consent. So this step is irreducibly manual. The probe exists to make it as smal
 python probe_registered_races.py
 ```
 
+On your own machine, in a terminal, from a checkout of this branch — it is a local CLI, not
+something the deployed app runs. Two consequences worth stating, because both have caught us:
+
+- **The branch is not merged**, so `main` does not contain the script. Run it from a checkout of
+  `feature/spr-20-oauth-design`.
+- **Streamlit Cloud secrets are server-side.** Values entered in the Streamlit dashboard are not
+  readable by a local process, so the probe needs the three values locally — as environment
+  variables for a one-off (nothing written to disk) or in `.streamlit/secrets.toml`. Streamlit
+  secrets are consulted first, then the environment.
+
 It prints a consent URL, you approve it, you paste back the URL you land on, and it prints the
 verdict. The landing page may 404 or fail to load — that is fine and expected, since what
 matters is the authorization code in the address bar.
@@ -348,7 +358,8 @@ hang it today either.
 ## Configuration
 
 Registered and in place as of 2026-10-09. Three secrets, in `.streamlit/secrets.toml` locally
-(gitignored) or the Streamlit Cloud secrets manager when deployed:
+(gitignored), the Streamlit Cloud secrets manager when deployed, or the environment for a
+one-off CLI run:
 
 ```toml
 RUNSIGNUP_OAUTH_CLIENT_ID = "..."
