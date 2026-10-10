@@ -131,7 +131,17 @@ def test_normalize_name_hyphen():
 
 
 def test_normalize_name_accents():
-    assert matching.normalize_name("Núñez") == "núñez"
+    # SPR-26 §2: accent folding so "Núñez" and "Nunez" are the same name.
+    assert matching.normalize_name("Núñez") == "nunez"
+    assert matching.normalize_name("Núñez") == matching.normalize_name("Nunez")
+
+
+def test_normalize_name_strips_trailing_suffix():
+    assert matching.normalize_name("Smith Jr") == "smith"
+    assert matching.normalize_name("Smith Jr.") == "smith"
+    assert matching.normalize_name("Smith Sr") == "smith"
+    assert matching.normalize_name("Smith III") == "smith"
+    assert matching.normalize_name("Smith") == matching.normalize_name("Smith Jr")
 
 
 def test_normalize_name_very_long_string():
@@ -167,34 +177,179 @@ def test_names_match_handles_punctuation_and_non_ascii(first, last):
     assert matching.names_match(first, last, first, last)
 
 
-@pytest.mark.parametrize("value", ["runner@example.com", "a.b+tag@sub.example.org"])
-def test_valid_email_accepts_ordinary_addresses(value):
+# -------------------------------------------------
+# name_agreement -- exact / nickname / initial / none
+# -------------------------------------------------
+def test_name_agreement_exact():
+    assert matching.name_agreement("Tom", "Spring", "Tom", "Spring") == "exact"
+    assert matching.name_agreement("José", "Muñoz", "Jose", "Munoz") == "exact"
+
+
+def test_name_agreement_requires_exact_last_name():
+    assert matching.name_agreement("Tom", "Spring", "Tom", "Springhower") == "none"
+
+
+@pytest.mark.parametrize(
+    "query_first,result_first",
+    [("Tom", "Thomas"), ("Mike", "Michael"), ("Liz", "Elizabeth"), ("Bob", "Robert")],
+)
+def test_name_agreement_known_nickname_pairs_either_direction(query_first, result_first):
+    assert matching.name_agreement(query_first, "Spring", result_first, "Spring") == "nickname"
+    assert matching.name_agreement(result_first, "Spring", query_first, "Spring") == "nickname"
+
+
+def test_name_agreement_single_initial():
+    assert matching.name_agreement("T", "Spring", "Thomas", "Spring") == "initial"
+    assert matching.name_agreement("Thomas", "Spring", "T", "Spring") == "initial"
+
+
+def test_name_agreement_unrelated_first_names_is_none():
+    assert matching.name_agreement("Tom", "Spring", "Jerry", "Spring") == "none"
+
+
+def test_name_agreement_suffix_does_not_block_last_name_match():
+    assert matching.name_agreement("Tom", "Spring", "Tom", "Spring Jr") == "exact"
+
+
+@pytest.mark.parametrize(
+    "query_first,query_last,result_first,result_last",
+    [
+        ("Tom", "Spring", "Thomas", "Spring"),
+        ("Tom", "Spring", "Tom", "Springhower"),
+        ("", "Spring", "Tom", "Spring"),
+        ("Tom", "", "Tom", "Spring"),
+    ],
+)
+def test_name_agreement_empty_or_mismatched_parts(
+    query_first, query_last, result_first, result_last
+):
+    # "Thomas"/"Tom" is a nickname pair, not "none" -- names_match (exact-only)
+    # still rejects it, which is what test_names_match_requires_both_* checks.
+    assert matching.name_agreement(query_first, query_last, result_first, result_last) != "exact"
+
+
+# -------------------------------------------------
+# classify_match -- the SPR-26 §2 four-bucket decision table
+# -------------------------------------------------
+def test_classify_match_exact_name_corroborated_age_is_certain():
+    verdict = matching.classify_match(date(1990, 6, 1), date(2026, 6, 1), 36, "exact")
+    assert verdict.bucket == matching.CERTAIN
+    assert verdict.age_signal == "corroborated"
+
+
+def test_classify_match_exact_name_unknown_age_is_maybe():
+    verdict = matching.classify_match(date(1990, 6, 1), date(2026, 6, 1), None, "exact")
+    assert verdict.bucket == matching.MAYBE
+    assert "no usable age" in verdict.reason
+
+
+def test_classify_match_exact_name_contradicted_age_is_ruled_out():
+    verdict = matching.classify_match(date(1990, 6, 1), date(2026, 6, 1), 20, "exact")
+    assert verdict.bucket == matching.RULED_OUT
+    assert verdict.age_signal == "contradicted"
+
+
+@pytest.mark.parametrize("name_signal", ["nickname", "initial"])
+def test_classify_match_weak_name_signal_is_never_certain(name_signal):
+    verdict = matching.classify_match(date(1990, 6, 1), date(2026, 6, 1), 36, name_signal)
+    assert verdict.bucket == matching.MAYBE
+    assert verdict.name_signal == name_signal
+
+
+@pytest.mark.parametrize("name_signal", ["nickname", "initial"])
+def test_classify_match_weak_name_signal_contradicted_age_is_ruled_out(name_signal):
+    verdict = matching.classify_match(date(1990, 6, 1), date(2026, 6, 1), 20, name_signal)
+    assert verdict.bucket == matching.RULED_OUT
+
+
+def test_classify_match_race_before_birth_is_impossible():
+    verdict = matching.classify_match(date(2010, 1, 1), date(2005, 1, 1), 40, "exact")
+    assert verdict.bucket == matching.IMPOSSIBLE
+    assert "before" in verdict.reason
+
+
+def test_classify_match_implied_age_under_five_is_impossible():
+    verdict = matching.classify_match(date(2024, 1, 1), date(2026, 1, 1), 2, "exact")
+    assert verdict.bucket == matching.IMPOSSIBLE
+
+
+def test_classify_match_unknown_race_date_is_maybe_regardless_of_age():
+    verdict = matching.classify_match(date(1990, 6, 1), None, 36, "exact")
+    assert verdict.bucket == matching.MAYBE
+    assert verdict.age_signal == "no-race-date"
+    assert "don't know when this race was held" in verdict.reason
+
+
+def test_classify_match_implausible_published_age_is_treated_as_unknown():
+    # age=952 is real observed junk data (see parse_result_age docstring).
+    verdict = matching.classify_match(date(1990, 6, 1), date(2026, 6, 1), 952, "exact")
+    assert verdict.bucket == matching.MAYBE
+    assert verdict.result_age is None
+
+
+# valid_email -- finish the job from SPR-27
+# -------------------------------------------------
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "runner@example.com",
+        "user+tag@domain.com",            # plus-addressing
+        "first.last@sub.example.org",    # subdomains
+        "UPPER@CASE.COM",                # uppercase
+        "user@host.co.uk",               # multi-dot TLD
+        " a@b.com ",                     # leading/trailing whitespace stripped
+        "user+long+tag@sub.domain.example.com",
+    ],
+)
+def test_valid_email_accepts_valid_addresses(value):
     assert matching.valid_email(value)
 
 
-@pytest.mark.parametrize("value", ["nope", "a@", "@b.com", "a b@c.com", ""])
-def test_valid_email_rejects_malformed_addresses(value):
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",                              # empty
+        None,                             # None
+        "nope",                           # missing @
+        "@nodomain.com",                  # missing local part
+        "user@",                          # missing domain
+        "user@host",                      # missing TLD
+        "a@@b.com",                       # double @
+        "a b@c.com",                      # embedded whitespace
+        "   ",                            # whitespace only
+    ],
+)
+def test_valid_email_rejects_invalid_addresses(value):
     assert not matching.valid_email(value)
 
 
-def test_valid_email_rejects_double_at():
-    assert not matching.valid_email("a@@b.com")
+# Double dots are an edge-case that the practical regex does not catch.
+# The function is a format gate, not an RFC 5322 parser -- it rejects the
+# common mistakes (@, domain, TLD) and lets obscurely-formed addresses
+# through. Tested here so we know what the function does and what it
+# doesn't do.
+def test_valid_email_does_not_catch_double_dots():
+    # Both pass the current regex. That is acceptable for a practical gate.
+    assert matching.valid_email("a.b..c@d.com")
+    assert matching.valid_email("a@b..com")
 
 
-def test_valid_email_accepts_leading_space_after_strip():
-    assert matching.valid_email(" runner@example.com")
+# Python's str.strip() removes tabs and newlines, so tab-wrapped input
+# becomes a clean address after strip -- the function accepts it.
+def test_valid_email_strips_tabs_and_newlines():
+    assert matching.valid_email("\tuser@example.com\n")
 
 
-def test_valid_email_accepts_trailing_space_after_strip():
-    assert matching.valid_email("runner@example.com ")
+def test_valid_email_very_long_input():
+    # A 500-character local part is absurd but should parse, not crash.
+    long_value = "a" * 500 + "@example.com"
+    assert matching.valid_email(long_value)
 
 
-def test_valid_email_rejects_empty_string():
-    assert not matching.valid_email("")
-
-
-def test_valid_email_rejects_none():
-    assert not matching.valid_email(None)
+def test_valid_email_unicode_local_part():
+    # Unicode in the local part passes the regex (it only blocks @ and whitespace).
+    assert matching.valid_email("josé@correo.méxico")
 
 
 def test_matching_module_has_no_network_or_persistence_imports():
