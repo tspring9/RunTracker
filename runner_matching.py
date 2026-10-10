@@ -57,7 +57,14 @@ MAX_PLAUSIBLE_AGE = 120
 MIN_PLAUSIBLE_FINISH_AGE = 5
 
 _WHITESPACE_RE = re.compile(r"\s+")
-_PUNCTUATION_RE = re.compile(r"[.,]")
+# Joining punctuation: deleted outright, so "O'Brien" and "OBrien" are one
+# name. Covers the typographic apostrophe and backtick too, because a web form
+# and a race-day spreadsheet rarely agree on which one they emit.
+_JOINING_PUNCTUATION_RE = re.compile(r"[.,'’‘`´]")
+# Separating punctuation: folded to a space, so "Smith-Jones" normalizes the
+# same way "Smith Jones" does. Squashing happens in _squash_name, which is what
+# then also reaches "SmithJones".
+_SEPARATING_PUNCTUATION_RE = re.compile(r"[-‐-―_/\\]+")
 _SUFFIX_RE = re.compile(r"\s+(jr|sr|ii|iii|iv)$")
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -155,7 +162,7 @@ def fold_to_ascii(value: str) -> str:
 
 
 def normalize_name(value: str) -> str:
-    """Casefold, fold accents to their base letters, drop ``.``/``,``, strip a
+    """Casefold, fold accents to their base letters, fold punctuation, strip a
     trailing Jr/Sr/II/III/IV suffix, and collapse whitespace.
 
     Accent folding means "Núñez" and "Nunez" normalize to the same string --
@@ -165,14 +172,49 @@ def normalize_name(value: str) -> str:
     those. Suffix stripping means "Smith Jr" and "Smith" agree on last name,
     which is what lets the decision table's last-name check stay a strict
     equality instead of a fuzzy one.
+
+    Punctuation folding is the SPR-26 §2 rule 1 requirement and it is not
+    cosmetic: RunSignUp publishes the same surname as "O'Brien", "OBrien" and
+    "O Brien" across result sets, so leaving the apostrophe in made a row with
+    the other spelling *not a match at all* -- never shown and never counted.
+    Joining punctuation is deleted, separating punctuation becomes a space.
     """
     text = str(value or "").strip()
     text = fold_to_ascii(text)
     text = text.casefold()
-    text = _PUNCTUATION_RE.sub("", text)
+    text = _JOINING_PUNCTUATION_RE.sub("", text)
+    text = _SEPARATING_PUNCTUATION_RE.sub(" ", text)
     text = _WHITESPACE_RE.sub(" ", text).strip()
     text = _SUFFIX_RE.sub("", text)
     return text.strip()
+
+
+def _squash_name(value: str) -> str:
+    """``normalize_name`` with every space removed.
+
+    The space-insensitive form of a name, used only as a fallback when the
+    normalized forms disagree. It is what makes "Smith-Jones", "Smith Jones"
+    and "SmithJones" one surname, and likewise "Mc Donald"/"McDonald" and
+    "Mary Ann"/"Maryann". Dropping spaces cannot merge two different surnames
+    that were not already a concatenation of each other, and "Your races"
+    still requires corroborating age on top of the name.
+    """
+    return normalize_name(value).replace(" ", "")
+
+
+def same_name_field(left: str, right: str) -> bool:
+    """True when two single name fields are the same name after folding.
+
+    The one place any caller should ask "is this the same first/last name?".
+    Transport-level re-filters used to do ``a.strip().lower() == b.strip().lower()``,
+    which silently undid the accent folding (SPR-45) and punctuation folding
+    (SPR-26 §2 rule 1) this module exists to provide. Empty on either side is
+    never a match.
+    """
+    folded_left, folded_right = normalize_name(left), normalize_name(right)
+    if not folded_left or not folded_right:
+        return False
+    return folded_left == folded_right or _squash_name(left) == _squash_name(right)
 
 
 def _is_nickname_pair(a: str, b: str) -> bool:
@@ -190,19 +232,20 @@ def _is_initial_match(a: str, b: str) -> bool:
 def name_agreement(query_first: str, query_last: str, result_first: str, result_last: str) -> str:
     """"exact" | "nickname" | "initial" | "none".
 
-    Last name must always match exactly (after normalize_name) -- SPR-26 §2
-    rule 1. First name may match exactly, as a known nickname pair, or as a
-    single initial against a full name. "none" means the row is not a match
-    at all: never shown, never counted, never scrolled past.
+    Last name must always match exactly (after normalize_name, or after
+    _squash_name when only internal spacing differs) -- SPR-26 §2 rule 1.
+    First name may match exactly, as a known nickname pair, or as a single
+    initial against a full name. "none" means the row is not a match at all:
+    never shown, never counted, never scrolled past.
     """
     q_first, q_last = normalize_name(query_first), normalize_name(query_last)
     r_first, r_last = normalize_name(result_first), normalize_name(result_last)
 
     if not q_first or not q_last or not r_first or not r_last:
         return "none"
-    if q_last != r_last:
+    if not same_name_field(q_last, r_last):
         return "none"
-    if q_first == r_first:
+    if same_name_field(q_first, r_first):
         return "exact"
     if _is_nickname_pair(q_first, r_first):
         return "nickname"

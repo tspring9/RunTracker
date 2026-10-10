@@ -123,11 +123,23 @@ def test_normalize_name_mixed_case():
 
 
 def test_normalize_name_apostrophe():
-    assert matching.normalize_name("O'Brien") == "o'brien"
+    # SPR-26 §2 rule 1 folds punctuation: an apostrophe is deleted, so the
+    # three spellings RunSignUp actually publishes are one name. The earlier
+    # assertion here kept "o'brien", which made an "OBrien" row not a match
+    # at all -- never shown, never counted.
+    assert matching.normalize_name("O'Brien") == "obrien"
+    assert matching.normalize_name("O’Brien") == "obrien"
+    assert matching.normalize_name("OBrien") == "obrien"
 
 
 def test_normalize_name_hyphen():
-    assert matching.normalize_name("Smith-Jones") == "smith-jones"
+    # A hyphen separates rather than joins, so it folds to a space and the
+    # space-insensitive form reaches the run-together spelling too.
+    assert matching.normalize_name("Smith-Jones") == "smith jones"
+    assert matching.normalize_name("Smith–Jones") == "smith jones"
+    assert matching._squash_name("Smith-Jones") == "smithjones"
+    assert matching._squash_name("Smith Jones") == "smithjones"
+    assert matching._squash_name("SmithJones") == "smithjones"
 
 
 def test_normalize_name_accents():
@@ -217,6 +229,43 @@ def test_name_agreement_exact():
 
 def test_name_agreement_requires_exact_last_name():
     assert matching.name_agreement("Tom", "Spring", "Tom", "Springhower") == "none"
+
+
+@pytest.mark.parametrize(
+    "query_last,result_last",
+    [
+        ("O'Brien", "OBrien"),
+        ("OBrien", "O'Brien"),
+        ("O’Brien", "O Brien"),
+        ("Smith-Jones", "Smith Jones"),
+        ("Smith-Jones", "SmithJones"),
+        ("Mc Donald", "McDonald"),
+        ("De La Cruz", "Delacruz"),
+    ],
+)
+def test_name_agreement_folds_punctuation_in_the_last_name(query_last, result_last):
+    # SPR-26 §2 rule 1. These spellings are the same surname, so the row has
+    # to survive to the chronology and age gates rather than being discarded
+    # as "not a match at all".
+    assert matching.name_agreement("Tom", query_last, "Tom", result_last) == "exact"
+
+
+def test_name_agreement_punctuation_folding_still_separates_real_differences():
+    # Folding spacing must not turn two different surnames into one.
+    assert matching.name_agreement("Tom", "O'Brien", "Tom", "OBriens") == "none"
+    assert matching.name_agreement("Tom", "Smith-Jones", "Tom", "Smith") == "none"
+
+
+def test_name_agreement_nickname_survives_punctuation_in_the_last_name():
+    assert matching.name_agreement("Mike", "O'Brien", "Michael", "OBrien") == "nickname"
+
+
+def test_name_agreement_initial_survives_punctuation_in_the_last_name():
+    assert matching.name_agreement("M.", "O'Brien", "Michael", "OBrien") == "initial"
+
+
+def test_name_agreement_folds_spacing_in_the_first_name():
+    assert matching.name_agreement("Mary Ann", "Spring", "Maryann", "Spring") == "exact"
 
 
 @pytest.mark.parametrize(

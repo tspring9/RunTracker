@@ -489,10 +489,15 @@ def find_runner_results(
         )
         for match in matches:
             # Server-side name filters are prefix/partial matches, so confirm
-            # the hit locally before presenting it as "your" result.
-            if last_name and last_name.strip().lower() != str(match.get("last_name", "")).strip().lower():
+            # the hit locally before presenting it as "your" result. Confirm it
+            # through runner_matching.same_name_field, not a bare
+            # strip().lower() -- that comparison undid the accent folding
+            # (SPR-45) and punctuation folding (SPR-26 §2 rule 1) applied on
+            # the way out, so a row published as "OBrien" for a query of
+            # "O'Brien" was fetched and then silently dropped here.
+            if last_name and not runner_matching.same_name_field(last_name, match.get("last_name", "")):
                 continue
-            if first_name and first_name.strip().lower() != str(match.get("first_name", "")).strip().lower():
+            if first_name and not runner_matching.same_name_field(first_name, match.get("first_name", "")):
                 continue
             row = result_to_tracker_row(match, context)
             row["_raw"] = match
