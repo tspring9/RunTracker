@@ -20,9 +20,15 @@ import runsignup_results as rsu
 
 @pytest.fixture(autouse=True)
 def clear_registration_env(monkeypatch):
-    """Start every test unregistered, regardless of the developer's own env."""
-    monkeypatch.delenv(rsu.API_REG_TOKEN_SETTING, raising=False)
-    monkeypatch.delenv(rsu.API_REG_SECRET_SETTING, raising=False)
+    """Start every test with no RunSignUp credentials at all.
+
+    Clears every setting in ``RUNSIGNUP_CREDENTIALS``, not just the
+    registration pair: a developer with a real ``RUNSIGNUP_API_KEY`` exported
+    would otherwise see different results from CI for the inventory tests.
+    """
+    for credential in rsu.RUNSIGNUP_CREDENTIALS:
+        for name in credential["settings"]:
+            monkeypatch.delenv(name, raising=False)
 
 
 class RecordingSession(requests.Session):
@@ -432,3 +438,104 @@ def test_probe_records_registration_state(probe_api, monkeypatch):
 
     monkeypatch.setenv(rsu.API_REG_TOKEN_SETTING, "4242.abcdef")
     assert rsu.probe_data_window(race_id=1)["registered"] is True
+
+# -------------------------------------------------
+# credential_inventory -- telling the credential types apart
+# -------------------------------------------------
+# The failure these guard against is a human one: OAuth clients, API keys and
+# caller registration all come off the same RunSignUp "API Keys" page, and only
+# registration has anything to do with the 2027-01-01 cutoff. Configuring the
+# wrong one must not look like having configured nothing.
+def test_inventory_covers_every_credential_kind():
+    kinds = {entry["kind"] for entry in rsu.credential_inventory()}
+    assert "API caller registration" in kinds
+    assert "OAuth 2.0 client" in kinds
+
+
+def test_only_registration_satisfies_the_deadline():
+    """If this ever flips, re-read RunSignUp's API Keys page before changing it.
+
+    RunSignUp is explicit that caller registration is not authentication and
+    authentication is not caller registration.
+    """
+    satisfying = [e["kind"] for e in rsu.credential_inventory() if e["satisfies_registration"]]
+    assert satisfying == ["API caller registration"]
+
+
+def test_inventory_reports_nothing_configured_by_default():
+    for entry in rsu.credential_inventory():
+        assert entry["configured"] is False
+        assert entry["partial"] is False
+        assert entry["set"] == ()
+        assert entry["missing"] == entry["settings"]
+
+
+def test_inventory_detects_oauth_without_registration(monkeypatch):
+    monkeypatch.setenv("RUNSIGNUP_OAUTH_CLIENT_ID", "client-123")
+    monkeypatch.setenv("RUNSIGNUP_OAUTH_CLIENT_SECRET", "client-secret")
+
+    by_kind = {e["kind"]: e for e in rsu.credential_inventory()}
+    assert by_kind["OAuth 2.0 client"]["configured"] is True
+    # The point of the test: OAuth being set up changes nothing about whether
+    # we are registered.
+    assert by_kind["API caller registration"]["configured"] is False
+    assert rsu.api_registration() == ("", "")
+
+
+def test_inventory_flags_a_half_configured_pair(monkeypatch):
+    monkeypatch.setenv("RUNSIGNUP_OAUTH_CLIENT_ID", "client-123")
+
+    oauth = {e["kind"]: e for e in rsu.credential_inventory()}["OAuth 2.0 client"]
+    assert oauth["partial"] is True
+    assert oauth["configured"] is False
+    assert oauth["set"] == ("RUNSIGNUP_OAUTH_CLIENT_ID",)
+    assert oauth["missing"] == ("RUNSIGNUP_OAUTH_CLIENT_SECRET",)
+
+
+def test_inventory_never_returns_credential_values(monkeypatch):
+    monkeypatch.setenv("RUNSIGNUP_OAUTH_CLIENT_SECRET", "super-secret-value")
+    monkeypatch.setenv(rsu.API_REG_SECRET_SETTING, "reg-secret-value")
+
+    rendered = repr(rsu.credential_inventory())
+    assert "super-secret-value" not in rendered
+    assert "reg-secret-value" not in rendered
+
+
+# -------------------------------------------------
+# registration_notes -- the OAuth confusion specifically
+# -------------------------------------------------
+def test_notes_say_oauth_is_not_registration(monkeypatch):
+    """Someone who registered an OAuth app has done real work on the API Keys
+    page and may think the deadline is handled. The note has to say otherwise."""
+    monkeypatch.setenv("RUNSIGNUP_OAUTH_CLIENT_ID", "client-123")
+    monkeypatch.setenv("RUNSIGNUP_OAUTH_CLIENT_SECRET", "client-secret")
+
+    notes = " ".join(rsu.registration_notes())
+    assert "OAuth 2.0 client" in notes
+    assert "NOT API caller registration" in notes
+    assert rsu.API_REG_ENFORCEMENT_DATE in notes
+
+
+def test_notes_name_the_wrong_setting_that_is_set(monkeypatch):
+    monkeypatch.setenv("RUNSIGNUP_API_KEY", "key")
+    monkeypatch.setenv("RUNSIGNUP_API_SECRET", "secret")
+
+    notes = " ".join(rsu.registration_notes())
+    assert "RUNSIGNUP_API_KEY" in notes
+    assert "API key / secret" in notes
+
+
+def test_notes_do_not_mention_other_credentials_once_registered(monkeypatch):
+    """Once registration is in place the cross-credential warning is noise."""
+    monkeypatch.setenv(rsu.API_REG_TOKEN_SETTING, "4242.abcdef")
+    monkeypatch.setenv(rsu.API_REG_SECRET_SETTING, "s3cr3t")
+    monkeypatch.setenv("RUNSIGNUP_OAUTH_CLIENT_ID", "client-123")
+
+    assert rsu.registration_notes() == []
+
+
+def test_notes_never_leak_the_other_credential_values(monkeypatch):
+    monkeypatch.setenv("RUNSIGNUP_OAUTH_CLIENT_SECRET", "oauth-secret-value")
+
+    notes = " ".join(rsu.registration_notes())
+    assert "oauth-secret-value" not in notes

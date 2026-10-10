@@ -34,6 +34,13 @@ of the deadline instead of being a flag-day change.
 See docs/runsignup-api-registration.md for where to put the two values and
 how to verify them.
 
+Registration is **not** authentication, and this trips people up: RunSignUp
+issues OAuth clients and API keys from the same "API Keys" page, and setting
+either of those up does nothing for the 2027 deadline. See
+:data:`RUNSIGNUP_CREDENTIALS` for the full map and
+``--check-registration``, which reports every credential type so a wrong one
+is visible rather than silent.
+
 Two other limits from the same announcement, worth knowing before you add
 callers: the API allows only **2 concurrent calls** (everything here issues
 requests sequentially, so that is headroom, not a constraint -- but do not
@@ -143,6 +150,76 @@ def api_registration() -> tuple[str, str]:
     return _setting(API_REG_TOKEN_SETTING), _setting(API_REG_SECRET_SETTING)
 
 
+# RunSignUp has several credential types and they are genuinely easy to
+# conflate -- they are issued from the same "API Keys" page, and two of them
+# have "register" in the name. Only the first row below has anything to do
+# with the 2027-01-01 deadline. RunSignUp's own API Keys page is explicit:
+#
+#   "API caller registration is not the same as your authentication to the
+#    API. You still need to use OAuth or API keys to access your race,
+#    events, etc."
+#
+# Both directions of that matter here: setting up an OAuth application does
+# *not* satisfy caller registration, and registering as a caller does *not*
+# authenticate anything. This table exists so --check-registration can say
+# which one somebody actually configured, instead of printing "(unset)" twice
+# and leaving them to guess. See docs/connected-track-oauth.md (SPR-20) for
+# the OAuth track; nothing here consumes the OAuth settings yet.
+RUNSIGNUP_CREDENTIALS = (
+    {
+        "kind": "API caller registration",
+        "settings": (API_REG_TOKEN_SETTING, API_REG_SECRET_SETTING),
+        "purpose": f"identifies this app to RunSignUp; required from {API_REG_ENFORCEMENT_DATE}",
+        "satisfies_registration": True,
+    },
+    {
+        "kind": "OAuth 2.0 client",
+        "settings": ("RUNSIGNUP_OAUTH_CLIENT_ID", "RUNSIGNUP_OAUTH_CLIENT_SECRET"),
+        "purpose": "lets a runner consent to us reading their own registrations (SPR-20)",
+        "satisfies_registration": False,
+    },
+    {
+        "kind": "API key / secret",
+        "settings": ("RUNSIGNUP_API_KEY", "RUNSIGNUP_API_SECRET"),
+        "purpose": "authenticates the race-search endpoint in app.py",
+        "satisfies_registration": False,
+    },
+    {
+        "kind": "Affiliate token",
+        "settings": ("RUNSIGNUP_AFFILIATE_TOKEN",),
+        "purpose": "decorates outbound race links; not authentication at all",
+        "satisfies_registration": False,
+    },
+)
+
+
+def credential_inventory() -> list[dict]:
+    """Which RunSignUp credentials are configured, by kind.
+
+    Reports on every credential type in :data:`RUNSIGNUP_CREDENTIALS`, not just
+    the registration pair, because the common failure here is configuring the
+    *wrong* one and having nothing say so. Values are never returned -- only
+    which setting names are populated.
+    """
+    inventory = []
+    for credential in RUNSIGNUP_CREDENTIALS:
+        names = credential["settings"]
+        present = {name: bool(_setting(name)) for name in names}
+        inventory.append(
+            {
+                "kind": credential["kind"],
+                "purpose": credential["purpose"],
+                "satisfies_registration": credential["satisfies_registration"],
+                "settings": names,
+                "set": tuple(name for name in names if present[name]),
+                "missing": tuple(name for name in names if not present[name]),
+                "configured": all(present.values()),
+                "partial": any(present.values()) and not all(present.values()),
+            }
+        )
+    return inventory
+
+
 def registration_notes() -> list[str]:
     """Human-readable warnings about the current registration config.
 
@@ -158,6 +235,23 @@ def registration_notes() -> list[str]:
             f"API Keys -> 'Register as an API caller', then set {API_REG_TOKEN_SETTING} "
             f"and {API_REG_SECRET_SETTING}."
         )
+        # Most useful warning in the file: somebody who set up OAuth (or an API
+        # key) has done real work on the API Keys page and may reasonably think
+        # the deadline is handled. Name what they configured and say plainly
+        # that it is a different credential.
+        others = [
+            entry
+            for entry in credential_inventory()
+            if entry["set"] and not entry["satisfies_registration"]
+        ]
+        for entry in others:
+            verb = "is" if len(entry["set"]) == 1 else "are"
+            notes.append(
+                f"{', '.join(entry['set'])} {verb} set -- that is the {entry['kind']}, "
+                f"which {entry['purpose']}. It is NOT API caller registration and does "
+                f"not satisfy the {API_REG_ENFORCEMENT_DATE} deadline. Registration is a "
+                f"separate, free step on the same RunSignUp 'API Keys' page."
+            )
     elif not token:
         notes.append(f"{API_REG_SECRET_SETTING} is set but {API_REG_TOKEN_SETTING} is missing; calls go out unregistered.")
     elif not secret:
@@ -785,8 +879,18 @@ if __name__ == "__main__":
         print(f"  {API_REG_SECRET_SETTING}: {'(set)' if secret else '(unset)'}")
         print(f"  sending {API_REG_TOKEN_PARAM} param:        {'yes' if token else 'no'}")
         print(f"  sending {API_REG_SECRET_HEADER} header: {'yes' if secret else 'no'}")
+
+        # The other credential types, so "(unset)" above can be told apart from
+        # "I configured the wrong thing".
+        print("\nOther RunSignUp credentials (none of these satisfy the deadline)")
+        for entry in credential_inventory():
+            if entry["satisfies_registration"]:
+                continue
+            state = "set" if entry["configured"] else ("partial" if entry["partial"] else "unset")
+            print(f"  {entry['kind']:<24} {state:<8} {entry['purpose']}")
+
         for note in registration_notes():
-            print(f"  ! {note}")
+            print(f"\n  ! {note}")
         try:
             race = fetch_race(args.race_id)
             print(f"  live call OK: race {args.race_id} -> {race.get('name', '?')}")

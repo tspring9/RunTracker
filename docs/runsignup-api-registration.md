@@ -40,6 +40,49 @@ correct, or both are unset. There is no useful in-between, and
 
 ---
 
+## This is not OAuth, and not an API key
+
+Worth reading before you start, because all of these are issued from the same
+RunSignUp **API Keys** page and two of them have "register" in the name.
+RunSignUp states it plainly on that page:
+
+> API caller registration is not the same as your authentication to the API.
+> You still need to use OAuth or API keys to access your race, events, etc.
+
+That cuts both ways: **registering as an API caller authenticates nothing, and
+setting up OAuth does not register you as a caller.**
+
+| Credential | Settings | What it does | Satisfies the 2027 deadline? |
+|---|---|---|---|
+| **API caller registration** | `RUNSIGNUP_API_REG_TOKEN`, `RUNSIGNUP_API_REG_SECRET` | Identifies this app so RunSignUp can contact us about breaking changes | **Yes — only this one** |
+| OAuth 2.0 client | `RUNSIGNUP_OAUTH_CLIENT_ID`, `RUNSIGNUP_OAUTH_CLIENT_SECRET` | Lets a runner consent to us reading their own registrations (SPR-20, `docs/connected-track-oauth.md`) | No |
+| API key / secret | `RUNSIGNUP_API_KEY`, `RUNSIGNUP_API_SECRET` | Authenticates the race-*search* endpoint in `app.py` | No |
+| Affiliate token | `RUNSIGNUP_AFFILIATE_TOKEN` | Decorates outbound race links — not authentication at all | No |
+
+So "I registered an OAuth application" and "I registered as an API caller" are
+two separate free steps on the same page, and the deadline only cares about the
+second. If you have done one and are not sure which, the command below tells
+you — it reports every credential type, so a wrongly-configured one shows up
+instead of looking like nothing was configured:
+
+```bash
+python runsignup_results.py --check-registration
+```
+
+With an OAuth client set up but no caller registration, it says so directly:
+
+```
+Other RunSignUp credentials (none of these satisfy the deadline)
+  OAuth 2.0 client         set      lets a runner consent to us reading their own registrations (SPR-20)
+
+  ! RUNSIGNUP_OAUTH_CLIENT_ID, RUNSIGNUP_OAUTH_CLIENT_SECRET are set -- that is
+    the OAuth 2.0 client, which lets a runner consent to us reading their own
+    registrations (SPR-20). It is NOT API caller registration and does not
+    satisfy the 2027-01-01 deadline.
+```
+
+---
+
 ## Where to put them
 
 ### Local development — `.streamlit/secrets.toml`
@@ -98,8 +141,16 @@ RunSignUp API caller registration
   RUNSIGNUP_API_REG_SECRET: (set)
   sending rsu_api_reg param:        yes
   sending X-RSU-API-REG-SECRET header: yes
+
+Other RunSignUp credentials (none of these satisfy the deadline)
+  OAuth 2.0 client         unset    lets a runner consent to us reading their own registrations (SPR-20)
+  API key / secret         unset    authenticates the race-search endpoint in app.py
+  Affiliate token          unset    decorates outbound race links; not authentication at all
   live call OK: race 85066 -> Hospital Hill Run
 ```
+
+No `!` warning lines is the signal that registration is complete. The "other
+credentials" block is informational — `unset` there is fine and expected.
 
 If instead you get `RunSignUpRegistrationError`, the token or secret is wrong.
 Re-copy both from RunSignUp → API Keys, or comment both out to restore
