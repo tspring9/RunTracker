@@ -19,6 +19,56 @@ import runsignup_results as rsu
 
 
 @pytest.mark.parametrize(
+    "query_last,result_last",
+    [
+        ("O'Brien", "OBrien"),
+        ("O'Brien", "O Brien"),
+        ("Smith-Jones", "Smith Jones"),
+        ("Smith-Jones", "SmithJones"),
+        ("Mc Donald", "McDonald"),
+        ("Núñez", "Nunez"),
+        ("Jørgensen", "Jorgensen"),
+    ],
+)
+def test_equivalent_surname_spellings_survive_the_name_gate(query_last, result_last):
+    assert matching.name_agreement("Runner", query_last, "Runner", result_last) != "none"
+
+
+@pytest.mark.parametrize(
+    "query_last,result_last",
+    [("O'Brien", "O'Briens"), ("Smith-Jones", "Smith")],
+)
+def test_distinct_surnames_remain_separate(query_last, result_last):
+    assert matching.name_agreement("Runner", query_last, "Runner", result_last) == "none"
+
+
+def test_name_fields_are_not_reconfirmed_with_bare_case_folding():
+    """All application-level name comparisons use runner_matching's contract."""
+    violations = []
+    for path in Path(".").glob("*.py"):
+        if path.name == "runner_matching.py" or path.name.startswith("test_"):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for comparison in (node for node in ast.walk(tree) if isinstance(node, ast.Compare)):
+            expressions = [comparison.left, *comparison.comparators]
+            folded_name_fields = []
+            for expression in expressions:
+                if not (
+                    isinstance(expression, ast.Call)
+                    and isinstance(expression.func, ast.Attribute)
+                    and expression.func.attr in {"lower", "casefold"}
+                ):
+                    continue
+                rendered = ast.unparse(expression.func.value).lower()
+                if "first_name" in rendered or "last_name" in rendered:
+                    folded_name_fields.append(rendered)
+            if len(folded_name_fields) >= 2:
+                violations.append((path.name, comparison.lineno, folded_name_fields))
+
+    assert violations == []
+
+
+@pytest.mark.parametrize(
     "case,dob,name_signal,event_date,raw_age,expected_bucket,expected_age_signal",
     [
         ("no name agreement", date(1981, 3, 7), "none", date(2014, 3, 7), 33, None, None),
