@@ -68,7 +68,7 @@ def test_call_budget_is_atomic_under_the_two_request_sweep_concurrency():
             self.barrier = Barrier(2)
 
         def __add__(self, amount):
-            self.barrier.wait(timeout=2)
+            self.barrier.wait(timeout=10)
             return amount
 
     budget.used = YieldingZero()

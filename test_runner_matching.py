@@ -127,6 +127,12 @@ def test_normalize_name_apostrophe():
     # three spellings RunSignUp actually publishes are one name. The earlier
     # assertion here kept "o'brien", which made an "OBrien" row not a match
     # at all -- never shown, never counted.
+    #
+    # DO NOT revert this (or test_normalize_name_hyphen below) toward the
+    # unfolded strings: the SPR-27 version of these two tests pinned the
+    # pre-design behaviour, and that behaviour was the defect. The design
+    # document is the contract, not whatever normalize_name happens to
+    # return. Raise it with Senior Full-Stack Dev if a case looks wrong.
     assert matching.normalize_name("O'Brien") == "obrien"
     assert matching.normalize_name("O’Brien") == "obrien"
     assert matching.normalize_name("OBrien") == "obrien"
