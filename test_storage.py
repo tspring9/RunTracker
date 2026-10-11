@@ -97,5 +97,101 @@ class StorageTests(unittest.TestCase):
         self.assertTrue(storage.is_onboarded("alice"))
 
 
+class ResultSetCatalogTests(unittest.TestCase):
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.environ["RUNTRACKER_DB_PATH"] = self.db_path
+        storage.reset_backend_cache()
+
+    def tearDown(self):
+        storage.reset_backend_cache()
+        os.environ.pop("RUNTRACKER_DB_PATH", None)
+        os.remove(self.db_path)
+
+    def sample_result_set(self, **overrides):
+        row = {
+            "race_id": 85066, "event_id": 1030728, "result_set_id": 644802,
+            "race_name": "Hospital Hill Run", "event_date": "2026-05-16",
+            "state": "mo", "last_modified_ts": 100,
+        }
+        row.update(overrides)
+        return row
+
+    def test_catalog_starts_empty(self):
+        self.assertEqual(storage.load_result_set_catalog(["MO"], 2026, 2026), [])
+        self.assertIsNone(storage.catalog_watermark())
+
+    def test_upsert_and_load_scoped_by_state_and_year(self):
+        storage.upsert_result_set_catalog(self.sample_result_set())
+        storage.upsert_result_set_catalog(
+            self.sample_result_set(race_id=1, event_id=2, result_set_id=3, state="ks", event_date="2026-04-11")
+        )
+
+        mo_rows = storage.load_result_set_catalog(["MO"], 2026, 2026)
+        self.assertEqual(len(mo_rows), 1)
+        self.assertEqual(mo_rows[0]["race_id"], 85066)
+        # state is normalized to upper-case on write.
+        self.assertEqual(mo_rows[0]["state"], "MO")
+
+        both_states = storage.load_result_set_catalog(["MO", "KS"], 2026, 2026)
+        self.assertEqual(len(both_states), 2)
+
+        wrong_year = storage.load_result_set_catalog(["MO"], 2020, 2024)
+        self.assertEqual(wrong_year, [])
+
+    def test_load_with_no_states_returns_empty_without_querying(self):
+        storage.upsert_result_set_catalog(self.sample_result_set())
+        self.assertEqual(storage.load_result_set_catalog([], 2026, 2026), [])
+
+    def test_upsert_is_idempotent_on_the_same_identity(self):
+        storage.upsert_result_set_catalog(self.sample_result_set(last_modified_ts=100))
+        storage.upsert_result_set_catalog(self.sample_result_set(last_modified_ts=200))
+
+        rows = storage.load_result_set_catalog(["MO"], 2026, 2026)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["last_modified_ts"], 200)
+
+    def test_catalog_watermark_is_the_max_last_modified_ts(self):
+        storage.upsert_result_set_catalog(
+            [
+                self.sample_result_set(result_set_id=1, last_modified_ts=100),
+                self.sample_result_set(result_set_id=2, last_modified_ts=500),
+            ]
+        )
+        self.assertEqual(storage.catalog_watermark(), 500)
+
+    def test_upsert_race_catalog_round_trips(self):
+        storage.upsert_race_catalog(
+            {
+                "race_id": 85066, "name": "Hospital Hill Run", "city": "Kansas City",
+                "state": "mo", "url": "https://runsignup.com/Race/85066",
+                "first_event_date": "2026-05-16", "last_event_date": "2026-05-16",
+            }
+        )
+        with storage.get_backend()._connect() as conn:
+            row = conn.execute("SELECT * FROM race_catalog WHERE race_id = ?", (85066,)).fetchone()
+        self.assertEqual(row["state"], "MO")
+        self.assertEqual(row["city"], "Kansas City")
+
+    def test_clear_catalog_wipes_both_tables(self):
+        storage.upsert_race_catalog({"race_id": 1, "name": "Race"})
+        storage.upsert_result_set_catalog(self.sample_result_set())
+
+        storage.clear_catalog()
+
+        self.assertEqual(storage.load_result_set_catalog(["MO"], 2026, 2026), [])
+        with storage.get_backend()._connect() as conn:
+            self.assertIsNone(conn.execute("SELECT * FROM race_catalog").fetchone())
+
+    def test_catalog_has_no_user_id_column(self):
+        storage.upsert_result_set_catalog(self.sample_result_set())
+        with storage.get_backend()._connect() as conn:
+            columns = {col[1] for col in conn.execute("PRAGMA table_info(result_set_catalog)")}
+            race_columns = {col[1] for col in conn.execute("PRAGMA table_info(race_catalog)")}
+        self.assertNotIn("user_id", columns)
+        self.assertNotIn("user_id", race_columns)
+
+
 if __name__ == "__main__":
     unittest.main()

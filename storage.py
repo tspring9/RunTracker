@@ -34,6 +34,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Iterable
 
 REQUIRED_COLUMNS = [
@@ -107,6 +108,26 @@ class Backend:
     def mark_onboarded(self, user_id: str) -> None:
         raise NotImplementedError
 
+    # Scoped result-set catalog (SPR-15/17) -- shared public metadata, not
+    # user-scoped. See the schema comment in SQLiteBackend._init_schema.
+    def upsert_race_catalog(self, rows) -> None:
+        raise NotImplementedError
+
+    def upsert_result_set_catalog(self, rows) -> None:
+        raise NotImplementedError
+
+    def load_result_set_catalog(self, states, start_year: int, end_year: int) -> list[dict]:
+        raise NotImplementedError
+
+    def load_race_catalog(self, race_ids) -> list[dict]:
+        raise NotImplementedError
+
+    def catalog_watermark(self) -> int | None:
+        raise NotImplementedError
+
+    def clear_catalog(self) -> None:
+        raise NotImplementedError
+
 
 class SQLiteBackend(Backend):
     def __init__(self, db_path: str | None = None):
@@ -153,6 +174,51 @@ class SQLiteBackend(Backend):
                     onboarded INTEGER NOT NULL DEFAULT 0
                 )
                 """
+            )
+            # race_catalog / result_set_catalog hold shared *public* RunSignUp
+            # metadata (SPR-15/17) -- deliberately no user_id. This is not
+            # per-user data, so it does not belong in the `races` table above.
+            #
+            # Only (race, event, result_set) identifiers + display metadata
+            # are ever written here, scoped to what a user's search actually
+            # requested. RunSignUp's API Developer Contract prohibits bulk
+            # extraction to build a copy of their data, so candidate_result_sets
+            # (results_search.py) discards every row it pages through that
+            # falls outside the requested state/year scope instead of caching
+            # the whole feed "to save a future call" -- resist that temptation
+            # if you touch this table.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS race_catalog (
+                    race_id INTEGER PRIMARY KEY,
+                    name TEXT,
+                    city TEXT,
+                    state TEXT,
+                    url TEXT,
+                    first_event_date TEXT,
+                    last_event_date TEXT,
+                    refreshed_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS result_set_catalog (
+                    race_id INTEGER,
+                    event_id INTEGER,
+                    result_set_id INTEGER,
+                    race_name TEXT,
+                    event_date TEXT,
+                    state TEXT,
+                    last_modified_ts INTEGER,
+                    refreshed_at TEXT,
+                    PRIMARY KEY (race_id, event_id, result_set_id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_result_set_catalog_scope "
+                "ON result_set_catalog(state, event_date)"
             )
 
     def load_races(self, user_id: str) -> list[dict]:
@@ -258,6 +324,116 @@ class SQLiteBackend(Backend):
                 (user_id,),
             )
 
+    # ---------------------------------------------
+    # Scoped result-set catalog (SPR-15/17) -- shared public metadata, no
+    # user_id. See the schema comment in _init_schema for the privacy rule.
+    # ---------------------------------------------
+    def upsert_race_catalog(self, rows) -> None:
+        rows = _coerce_rows(rows)
+        if not rows:
+            return
+        refreshed_at = _utcnow_iso()
+        with self._connect() as conn:
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT INTO race_catalog (
+                        race_id, name, city, state, url,
+                        first_event_date, last_event_date, refreshed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(race_id) DO UPDATE SET
+                        name=excluded.name, city=excluded.city, state=excluded.state,
+                        url=excluded.url, first_event_date=excluded.first_event_date,
+                        last_event_date=excluded.last_event_date, refreshed_at=excluded.refreshed_at
+                    """,
+                    (
+                        row.get("race_id"),
+                        row.get("name", "") or "",
+                        row.get("city", "") or "",
+                        (row.get("state") or "").upper(),
+                        row.get("url", "") or "",
+                        row.get("first_event_date", "") or "",
+                        row.get("last_event_date", "") or "",
+                        refreshed_at,
+                    ),
+                )
+
+    def upsert_result_set_catalog(self, rows) -> None:
+        rows = _coerce_rows(rows)
+        if not rows:
+            return
+        refreshed_at = _utcnow_iso()
+        with self._connect() as conn:
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT INTO result_set_catalog (
+                        race_id, event_id, result_set_id, race_name,
+                        event_date, state, last_modified_ts, refreshed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(race_id, event_id, result_set_id) DO UPDATE SET
+                        race_name=excluded.race_name, event_date=excluded.event_date,
+                        state=excluded.state, last_modified_ts=excluded.last_modified_ts,
+                        refreshed_at=excluded.refreshed_at
+                    """,
+                    (
+                        row.get("race_id"),
+                        row.get("event_id"),
+                        row.get("result_set_id"),
+                        row.get("race_name", "") or "",
+                        row.get("event_date", "") or "",
+                        (row.get("state") or "").upper(),
+                        row.get("last_modified_ts"),
+                        refreshed_at,
+                    ),
+                )
+
+    def load_result_set_catalog(self, states, start_year: int, end_year: int) -> list[dict]:
+        state_list = [str(state).upper() for state in states]
+        if not state_list:
+            return []
+        placeholders = ",".join("?" for _ in state_list)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"""
+                SELECT * FROM result_set_catalog
+                WHERE state IN ({placeholders})
+                  AND substr(event_date, 1, 4) BETWEEN ? AND ?
+                ORDER BY event_date
+                """,
+                (*state_list, f"{int(start_year):04d}", f"{int(end_year):04d}"),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def load_race_catalog(self, race_ids) -> list[dict]:
+        """Not part of SPR-17's frozen storage contract -- a small additive
+        helper so results_search.py can enrich cached result-set rows with
+        race-level city/url without re-fetching the race listing."""
+        id_list = list(race_ids)
+        if not id_list:
+            return []
+        placeholders = ",".join("?" for _ in id_list)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"SELECT * FROM race_catalog WHERE race_id IN ({placeholders})", id_list
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def catalog_watermark(self) -> int | None:
+        with self._connect() as conn:
+            cur = conn.execute("SELECT MAX(last_modified_ts) AS watermark FROM result_set_catalog")
+            row = cur.fetchone()
+            return row["watermark"] if row and row["watermark"] is not None else None
+
+    def clear_catalog(self) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM race_catalog")
+            conn.execute("DELETE FROM result_set_catalog")
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
 
 _backend: Backend | None = None
 
@@ -316,3 +492,31 @@ def is_onboarded(user_id: str) -> bool:
 
 def mark_onboarded(user_id: str) -> None:
     get_backend().mark_onboarded(user_id)
+
+
+# -------------------------------------------------
+# Scoped result-set catalog (SPR-15/17) -- no user_id. See the schema
+# comment in SQLiteBackend._init_schema for why this stays out of `races`.
+# -------------------------------------------------
+def upsert_race_catalog(rows) -> None:
+    get_backend().upsert_race_catalog(rows)
+
+
+def upsert_result_set_catalog(rows) -> None:
+    get_backend().upsert_result_set_catalog(rows)
+
+
+def load_result_set_catalog(states, start_year: int, end_year: int) -> list[dict]:
+    return get_backend().load_result_set_catalog(states, start_year, end_year)
+
+
+def load_race_catalog(race_ids) -> list[dict]:
+    return get_backend().load_race_catalog(race_ids)
+
+
+def catalog_watermark() -> int | None:
+    return get_backend().catalog_watermark()
+
+
+def clear_catalog() -> None:
+    get_backend().clear_catalog()
