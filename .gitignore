@@ -21,6 +21,13 @@ Thumbs.db
 # Generated RunSignUp data pulls (large, regenerable)
 data/
 
+# Output of probe_registered_races.py. The report is structural only and is meant
+# to be pasted into a ticket deliberately, but it describes a real person's
+# registration history, so it should not be committed by accident. A payload dump
+# from --save-payload contains that history in full.
+registered-races-probe-report.md
+*-payload.json
+
 # Local SQLite storage (storage.py) -- never commit real user race data.
 # Streamlit Community Cloud's filesystem is ephemeral anyway; see storage.py.
 *.db
