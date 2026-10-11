@@ -27,6 +27,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import runner_matching
+
 # -------------------------------------------------
 # Endpoints
 # -------------------------------------------------
@@ -87,21 +89,44 @@ def _get(path: str, **params) -> dict:
     with the extension, and verified live to be harmless either way, but
     skipping it keeps the request shape unambiguous rather than relying on
     RunSignUp silently tolerating both.
+
+    SPR-42 hardening: a raw upstream response body never reaches an
+    exception message. A 10,000-character name produced raw nginx HTML
+    here, which then surfaced directly in the UI. Three specific upstream
+    failures get a plain-language message instead of the body:
+
+    - a non-JSON body (an HTML error page, typically) -> a generic
+      "unexpected response" message.
+    - ``error_code 13`` (returned for ``/races`` paging beyond page 1 of
+      1,000+ results, SPR-36) -> "too broad to search without
+      credentials" -- never "you must log in". The paging bug is fixed by
+      never requesting page 2 (see ``search_races_in_window``); this
+      module must not suggest credentials as the fix.
+    - HTTP 414 (URI too long, from an absurdly long name) -> "that name is
+      too long to search."
     """
     if not path.endswith(".json"):
         params.setdefault("format", "json")
     response = _SESSION.get(f"{RESULTS_API_HOST}{path}", params=params, timeout=DEFAULT_TIMEOUT)
 
-    if response.status_code != 200:
-        raise RunSignUpError(f"RunSignUp HTTP {response.status_code} for {path}: {response.text[:500]}")
+    if response.status_code == 414:
+        raise RunSignUpError("That name is too long to search.")
 
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError:
+        raise RunSignUpError("RunSignUp returned an unexpected response.") from None
+
+    if response.status_code != 200:
+        raise RunSignUpError(f"RunSignUp returned an unexpected response (HTTP {response.status_code}).")
 
     # RunSignUp returns HTTP 200 with an {"error": {...}} body on bad params,
     # so a status check alone is not enough.
     if isinstance(payload, dict) and "error" in payload:
         error = payload["error"]
-        raise RunSignUpError(f"RunSignUp API error for {path}: {error.get('error_msg', error)}")
+        if error.get("error_code") == 13:
+            raise RunSignUpError("That scope is too broad to search without credentials.")
+        raise RunSignUpError("RunSignUp returned an unexpected response (API error).")
 
     return payload
 
@@ -361,6 +386,13 @@ def fetch_results(
     ``first_name`` / ``last_name`` are honoured server-side, which is what makes
     "find my result in a 1,156-person race" cheap -- pass them whenever you can
     instead of downloading the whole field and filtering locally.
+
+    Both are ASCII-folded before the request goes out (SPR-45): RunSignUp's
+    name filter folds combining-mark accents but not o-slash, sharp-s,
+    l-stroke, ae or eth, so a query carrying one of those letters gets zero
+    rows back from the server, before any local matching runs. Folding here
+    widens the query slightly -- harmless, since every row returned still
+    has to pass the caller's own name-agreement check.
     """
     results: list[dict] = []
     page_size = max(1, min(int(results_per_page), MAX_RESULTS_PER_PAGE))
@@ -373,9 +405,9 @@ def fetch_results(
             "results_per_page": page_size,
         }
         if first_name:
-            params["first_name"] = first_name
+            params["first_name"] = runner_matching.fold_to_ascii(first_name)
         if last_name:
-            params["last_name"] = last_name
+            params["last_name"] = runner_matching.fold_to_ascii(last_name)
 
         payload = _get(f"/race/{race_id}/results/get-results", **params)
         sets = payload.get("individual_results_sets") or []
@@ -457,10 +489,15 @@ def find_runner_results(
         )
         for match in matches:
             # Server-side name filters are prefix/partial matches, so confirm
-            # the hit locally before presenting it as "your" result.
-            if last_name and last_name.strip().lower() != str(match.get("last_name", "")).strip().lower():
+            # the hit locally before presenting it as "your" result. Confirm it
+            # through runner_matching.same_name_field, not a bare
+            # strip().lower() -- that comparison undid the accent folding
+            # (SPR-45) and punctuation folding (SPR-26 §2 rule 1) applied on
+            # the way out, so a row published as "OBrien" for a query of
+            # "O'Brien" was fetched and then silently dropped here.
+            if last_name and not runner_matching.same_name_field(last_name, match.get("last_name", "")):
                 continue
-            if first_name and first_name.strip().lower() != str(match.get("first_name", "")).strip().lower():
+            if first_name and not runner_matching.same_name_field(first_name, match.get("first_name", "")):
                 continue
             row = result_to_tracker_row(match, context)
             row["_raw"] = match
@@ -546,6 +583,57 @@ def search_races_by_state_range(
             }
         )
     return races
+
+
+def search_races_in_window(state: str, start_date: str, end_date: str, budget) -> list[dict]:
+    """Adaptive-split state/date-range race search. NEVER requests page >= 2.
+
+    ``/races`` page 2 of a 1,000+-race window returns ``error_code 13``
+    (SPR-36): RunSignUp requires credentials for deep pagination, it is not
+    a missing-credentials bug on our side. The fix is to keep every call on
+    page 1 by halving the date window whenever a call comes back with a
+    full page, recursing (year -> half -> quarter -> ...) until each half's
+    window fits on one page. Verified live on 2026-10-09: MO 2022/2024/2026
+    each fit in a single call; CA 2024 (exactly 1,000 rows) needs one split.
+
+    ``budget`` is any object exposing ``spend(n: int = 1) -> bool`` (see
+    ``results_search.CallBudget``) -- spent once per ``/races`` call, and
+    checked *before* every call, so this can never exceed it. Returns
+    whatever was fetched before the budget ran out, which may be a partial
+    scope rather than the whole window.
+    """
+    if not budget.spend():
+        return []
+
+    races = search_races_by_state_range(
+        state, start_date, end_date, page=1, results_per_page=MAX_RESULTS_PER_PAGE
+    )
+
+    start = date.fromisoformat(start_date)
+    end = date.fromisoformat(end_date)
+    if len(races) < MAX_RESULTS_PER_PAGE or start >= end:
+        return races
+
+    midpoint = start + (end - start) // 2
+    second_half_start = midpoint + timedelta(days=1)
+    if second_half_start > end:
+        return races  # window is already a single day -- cannot split further
+
+    first_half = search_races_in_window(state, start.isoformat(), midpoint.isoformat(), budget)
+    second_half = search_races_in_window(state, second_half_start.isoformat(), end.isoformat(), budget)
+
+    # A race spanning both halves (a multi-day event near the split point)
+    # would otherwise appear twice; merge on race_id and union event_dates.
+    merged: dict[int, dict] = {}
+    for race in first_half + second_half:
+        race_id = race["race_id"]
+        if race_id in merged:
+            merged[race_id]["event_dates"] = sorted(
+                set(merged[race_id]["event_dates"]) | set(race["event_dates"])
+            )
+        else:
+            merged[race_id] = dict(race)
+    return list(merged.values())
 
 
 def event_has_results(race_id: int, event_id: int) -> bool:

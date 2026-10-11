@@ -3,10 +3,12 @@ import requests
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
+import connected_track
 import results_search
 import runner_matching
+import runsignup_oauth as oauth
 import runsignup_results as rsu
 import storage
 import discovery_experiment as discovery
@@ -18,7 +20,6 @@ st.set_page_config(page_title="50 States Race Tracker", layout="wide")
 # -------------------------------------------------
 # This is the same endpoint that worked in the standalone RaceGetRunsignup app.
 RUNSIGNUP_API_URL = "https://api.runsignup.com/rest/races"
-API_URL = RUNSIGNUP_API_URL  # optional alias, kept for consistency with the prototype
 
 # Credentials live in .streamlit/secrets.toml locally and in the Streamlit Cloud
 # secrets manager when deployed. They are read via get_secret() below -- never
@@ -405,7 +406,6 @@ def fetch_runsignup_future_races_for_state(state_code: str) -> pd.DataFrame:
             params["api_key"] = api_key
             params["api_secret"] = api_secret
 
-        # FIX: this constant is now defined at the top of the file.
         response = requests.get(RUNSIGNUP_API_URL, params=params, timeout=30)
 
         if response.status_code != 200:
@@ -494,20 +494,23 @@ def cached_runner_results(
 
 
 # -------------------------------------------------
-# Name-first Sign Up search (SPR-15/18) -- capped sweep orchestration
+# Name-first Sign Up search (SPR-15/18/30) -- indexed sweep orchestration
 # -------------------------------------------------
-# PRIVACY: these two functions are the actual cache-key boundary DOB/email
-# must never cross. Streamlit cache keys are inspectable, so age
-# classification happens in the Sign Up tab, AFTER these calls return, on
-# the rows they hand back -- never pass dob/email into either of these.
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def cached_candidate_result_sets(states: tuple, start_year: int, end_year: int, max_calls: int, _progress_cb=None):
-    scope = results_search.SearchScope(states=tuple(states), start_year=start_year, end_year=end_year, max_calls=max_calls)
-    return results_search.candidate_result_sets(scope, progress_cb=_progress_cb)
-
-
-@st.cache_data(ttl=60 * 30, show_spinner=False)
-def cached_sweep_for_runner(
+# PRIVACY: never pass dob/email into this -- age classification happens in
+# the Sign Up tab, AFTER this call returns, on the rows it hands back,
+# because Streamlit cache keys are inspectable.
+#
+# NOT cached: SPR-30 moved discovery offline, so indexed_candidates below is
+# a zero-HTTP SQLite read and the only network call left in the request
+# path is sweep_for_runner's get-results calls, driven by _progress_cb
+# writing live Streamlit widgets -- exactly the shape @st.cache_data must
+# never wrap, since a cache hit would replay those widget writes into a
+# layout that no longer exists (SPR-38: this is what produced the
+# "cached_sweep_for_runner layout-replay error" QA hit on a second
+# identical submit, 2/2, including against a warm cache in a fresh
+# session, back when this function still called the old online discovery
+# path and was itself decorated with @st.cache_data).
+def run_signup_sweep(
     first_name: str,
     last_name: str,
     states: tuple,
@@ -518,7 +521,7 @@ def cached_sweep_for_runner(
     _progress_cb=None,
 ):
     scope = results_search.SearchScope(states=tuple(states), start_year=start_year, end_year=end_year, max_calls=max_calls)
-    candidates = cached_candidate_result_sets(states, start_year, end_year, max_calls, _progress_cb=_progress_cb)
+    candidates = results_search.indexed_candidates(scope, preferred_states=tuple(states))
     return results_search.sweep_for_runner(
         first_name, last_name, candidates, scope, progress_cb=_progress_cb, resume_cursor=resume_cursor
     )
@@ -529,10 +532,60 @@ def describe_signup_scope(states, start_year: int, end_year: int, max_calls: int
     return f"Will search {state_text} for {start_year}–{end_year}, up to {max_calls} API calls."
 
 
+SIGNUP_STATE_UNBUILT_INDEX = "unbuilt_index"
+SIGNUP_STATE_NO_MATCH = "no_match"
+
+
+def signup_done_state(known: int) -> str:
+    """Which terminal message a "done" outcome with no matches renders.
+
+    Branches on ``known == 0`` alone -- before anything about complete or
+    capped even enters the picture (SPR-49). An empty index is its own
+    terminal state, not a degenerate case of "searched everything and found
+    nothing": with zero candidates, ``complete`` is trivially ``True``
+    (``checked == known == 0``), and rendering that as "we checked all 0
+    known results" claims a search that never happened.
+    """
+    return SIGNUP_STATE_UNBUILT_INDEX if known == 0 else SIGNUP_STATE_NO_MATCH
+
+
+def describe_signup_unbuilt_index_state(state_text: str, start_year, end_year) -> str:
+    """known == 0: nothing is indexed for this scope. Must never read as
+    "searched and found nothing" -- it must not contain "no results",
+    "none match", or "all 0" (SPR-49 acceptance #1), name the way out
+    (the offline index builder), and offer no "Keep looking" button since
+    there is nothing indexed to keep looking through.
+    """
+    return (
+        f"Nothing is indexed yet for {state_text} races, {start_year}–{end_year}, so we cannot "
+        "tell you whether you have results there. Run the offline index builder "
+        "(`results_search.build_index`, CLI) for this scope, then search again."
+    )
+
+
+def describe_signup_no_match_state(known: int, capped: bool, state_text: str, start_year, end_year) -> str:
+    return (
+        f"We checked {'all ' if not capped else ''}{known} known result"
+        f"{'s' if known != 1 else ''} for {state_text} races, {start_year}–{end_year}, and none "
+        "match that name and date of birth. That does not mean you did not run — it means not "
+        "in what we checked."
+    )
+
+
+def signup_query_stamp(first_name: str, last_name: str, dob) -> str:
+    """Identity of the query that produced a set of Sign Up results (SPR-37).
+
+    Over the *normalised* values, so "Tom "/"tom" collide on purpose but a
+    changed name or DOB never does. Results are rendered only when this
+    stamp still equals the current form values -- there is no code path
+    where a stale row from a previous query is confirmable.
+    """
+    dob_text = dob.isoformat() if dob else ""
+    return f"{runner_matching.normalize_name(first_name)}|{runner_matching.normalize_name(last_name)}|{dob_text}"
+
+
 def render_signup_progress(progress, bar, caption) -> None:
     stage_labels = {
-        "races": "Finding races in scope",
-        "catalog": "Checking which races have published results",
         "sweep": "Searching results for your name",
         "capped": "Paused at the call cap",
         "done": "Done",
@@ -547,22 +600,27 @@ def render_signup_progress(progress, bar, caption) -> None:
     caption.caption(f"API calls this step: {progress.calls_used} / {progress.calls_budget}")
 
 
-def classify_signup_matches(matches: list, dob: date) -> list:
-    """Age classification happens here, after the cache boundary above, on
-    rows that already left the cache. dob never travels any further than
-    this function and the session state it was read from.
+def classify_signup_matches(matches: list, first_name: str, last_name: str, dob: date) -> list:
+    """Bucket classification (SPR-26 §2, via runner_matching.classify_match)
+    happens here, after the cache boundary above, on rows that already left
+    the cache. dob never travels any further than this function and the
+    session state it was read from.
 
     results_search.py's candidates carry "event_date", but
     rsu.result_to_tracker_row (reused by sweep_for_runner) reads
-    context.get("date", ""), so every row that comes out of the capped
-    sweep currently has an empty race_date. Backfilled here from
-    _context["event_date"] rather than touching the frozen SPR-17
-    contract; flagged on SPR-18 for the backend owner to fix at the source.
+    context.get("date", ""), so every row that comes out of the sweep
+    currently has an empty race_date. Backfilled here from
+    _context["event_date"] rather than touching the frozen SPR-30 contract.
 
     De-duplication happens here rather than inside sweep_for_runner because
     this is the only place that sees the *accumulated* match list -- the
     caller appends each resumed sweep's rows to the previous ones, so a
     per-call dedupe would miss duplicates that straddle the call cap.
+
+    name_signal is recomputed here rather than trusted from upstream: today
+    sweep_for_runner still filters with the legacy exact-only names_match,
+    so every row arrives "exact", but classify_match's decision table
+    already distinguishes nickname/initial for whenever that filter loosens.
     """
     classified = []
     for row in results_search.dedupe_matches(matches):
@@ -571,16 +629,117 @@ def classify_signup_matches(matches: list, dob: date) -> list:
         race_date_str = row.get("race_date") or context.get("event_date", "")
         if not row.get("race_date") and race_date_str:
             row = {**row, "race_date": race_date_str}
-        result_age = runner_matching.parse_result_age(raw.get("age"))
-        age_on_race_date = None
         try:
-            race_date_obj = datetime.strptime(race_date_str, "%Y-%m-%d").date()
-            age_on_race_date = runner_matching.age_on_date(dob, race_date_obj)
+            event_date_obj = datetime.strptime(race_date_str, "%Y-%m-%d").date()
         except (ValueError, TypeError):
-            age_on_race_date = None
-        confidence, reason = runner_matching.classify_confidence(age_on_race_date, result_age)
-        classified.append({**row, "_confidence": confidence, "_reason": reason, "_result_age": result_age})
+            event_date_obj = None
+        name_signal = runner_matching.name_agreement(
+            first_name, last_name, raw.get("first_name", ""), raw.get("last_name", "")
+        )
+        verdict = runner_matching.classify_match(dob, event_date_obj, raw.get("age"), name_signal)
+        classified.append({**row, "_verdict": verdict})
     return classified
+
+
+# -------------------------------------------------
+# Connected track (SPR-20/74): OAuth round trip, then the existing chain
+# -------------------------------------------------
+# PRIVACY: the access token lives in st.session_state only -- never storage,
+# never a log, never a @st.cache_data/@st.cache_resource key. The PKCE verifier
+# and CSRF state are server-side only, in the store below, and are popped
+# (one-time) the moment the callback redeems them.
+CONNECTED_OAUTH_STATE_TTL_SECONDS = 5 * 60  # matches the authorization code's own expiry
+CONNECTED_SWEEP_MAX_CALLS = 200  # sweep-stage cap; discovery has its own cap inside connected_track
+
+
+@st.cache_resource(show_spinner=False)
+def _pending_oauth_store() -> dict:
+    """Server-side ``state -> (code_verifier, created_at)``.
+
+    Streamlit resets st.session_state on the full page load an OAuth redirect
+    causes, so the PKCE verifier and CSRF state started before the redirect
+    have to live somewhere that survives it (docs/connected-track-oauth.md).
+    A cache_resource singleton is that somewhere -- it is process-wide, not
+    per-session, which is the point. Entries are pruned by age on each access
+    rather than by a store-wide TTL, since a store-wide TTL would evict every
+    other visitor's in-flight connection attempt whenever any one of them
+    aged out.
+    """
+    return {}
+
+
+def _prune_pending_oauth(store: dict) -> None:
+    now = datetime.now(timezone.utc)
+    expired = [
+        state
+        for state, (_, created_at) in store.items()
+        if (now - created_at).total_seconds() > CONNECTED_OAUTH_STATE_TTL_SECONDS
+    ]
+    for state in expired:
+        store.pop(state, None)
+
+
+def handle_connected_oauth_callback() -> None:
+    """Redeem an OAuth redirect back from RunSignUp, if this page load is one.
+
+    Must run before anything else on the page depends on st.query_params.
+    Clears ``code`` and ``state`` individually and leaves ``user`` alone --
+    never st.query_params.clear() -- because a single-use authorization code
+    left in the address bar lands in browser history and in any screenshot.
+    """
+    params = st.query_params
+    if "code" not in params and "state" not in params and "error" not in params:
+        return
+
+    returned_state = params.get("state", "") or ""
+    store = _pending_oauth_store()
+    _prune_pending_oauth(store)
+    pending_entry = store.pop(returned_state, None) if returned_state else None
+
+    try:
+        if pending_entry is None:
+            raise oauth.OAuthFlowError(
+                "This RunSignUp connection attempt expired or was already used. Start again."
+            )
+        code_verifier, _created_at = pending_entry
+        code = oauth.authorization_code_from_callback(params, returned_state)
+        grant = oauth.redeem_code(oauth.oauth_config(), code, code_verifier)
+        st.session_state.connected_access_token = grant.access_token
+        st.session_state.connected_oauth_error = ""
+    except Exception as exc:
+        st.session_state.connected_oauth_error = str(exc)
+    finally:
+        # This specific consent link is spent either way -- redeemed on
+        # success, single-use and invalid on failure -- so clear it rather
+        # than leaving a dead "Continue to RunSignUp" link in the expander.
+        st.session_state.connected_oauth_pending_url = ""
+        for key in ("code", "state", "error", "error_description"):
+            if key in st.query_params:
+                del st.query_params[key]
+        st.rerun()
+
+
+def run_connected_sweep(
+    first_name: str,
+    last_name: str,
+    access_token: str,
+    states: tuple,
+    start_year: int,
+    end_year: int,
+) -> tuple[list[dict], connected_track.CoverageReport]:
+    """Access token -> (matches, CoverageReport), through the *existing* chain.
+
+    connected_track turns the runner's own registrations into candidate result
+    sets; results_search.sweep_for_runner does the name filtering -- the same
+    function and the same filtering the anonymous track uses (SPR-15). No
+    second matching engine.
+    """
+    result = connected_track.discover_connected_candidates(access_token)
+    scope = results_search.SearchScope(
+        states=tuple(states), start_year=start_year, end_year=end_year, max_calls=CONNECTED_SWEEP_MAX_CALLS
+    )
+    matches, _sweep_coverage = results_search.sweep_for_runner(first_name, last_name, result.candidates, scope)
+    return matches, result.coverage
 
 
 # -------------------------------------------------
@@ -588,6 +747,19 @@ def classify_signup_matches(matches: list, dob: date) -> list:
 # -------------------------------------------------
 # USER_ID is single-tenant for now -- see resolve_user_id() for the auth seam.
 USER_ID = resolve_user_id()
+
+# Must run before anything else reads st.query_params: a RunSignUp OAuth
+# redirect lands here as a fresh session, and this is what completes it.
+handle_connected_oauth_callback()
+
+for _connected_key, _connected_default in (
+    ("connected_access_token", None),
+    ("connected_oauth_pending_url", ""),
+    ("connected_oauth_error", ""),
+    ("connected_coverage_text", ""),
+    ("connected_search_error", ""),
+):
+    st.session_state.setdefault(_connected_key, _connected_default)
 
 if "source_data" not in st.session_state:
     stored_rows = storage.load_races(USER_ID)
@@ -909,14 +1081,31 @@ with signup_page:
         ("signup_rejected_keys", set()),
         ("signup_scope", None),
         ("signup_error", ""),
+        # "" = never searched, "done" = last attempt completed, "error" = last
+        # attempt raised. Kept separate from signup_matches being empty so a
+        # genuine zero-result search and a failed search render as distinct
+        # branches (SPR-40/43) instead of both falling through to the same
+        # "no matching results" sentence.
+        ("signup_outcome", ""),
+        ("signup_search_error_detail", ""),
+        # Real Coverage.index_built_at (ISO, or "" if the offline index has
+        # never covered this scope) -- the "Index last refreshed" half of
+        # the coverage line, SPR-26 §4.
+        ("signup_index_built_at", ""),
+        # Stamp of the query that produced signup_matches/signup_outcome, over
+        # normalised first/last/dob. Set only when a search is dispatched.
+        ("signup_query_stamp", None),
+        ("signup_continue_requested", False),
     ):
         st.session_state.setdefault(key, default)
 
+    # Four fields. Nothing else -- no race ID, no result-set ID, nothing
+    # Advanced is required to get a result here (SPR-32 §1/§7).
     su1, su2, su3 = st.columns(3)
     with su1:
-        signup_first_name = st.text_input("First name", key="signup_first_name")
+        signup_first_name = st.text_input("First name", key="signup_first_name", max_chars=80)
     with su2:
-        signup_last_name = st.text_input("Last name", key="signup_last_name")
+        signup_last_name = st.text_input("Last name", key="signup_last_name", max_chars=80)
     with su3:
         signup_dob = st.date_input(
             "Date of birth",
@@ -924,6 +1113,7 @@ with signup_page:
             min_value=SIGNUP_MIN_DOB,
             max_value=date.today(),
             key="signup_dob_input",
+            help="It tells your results apart from other people with your name.",
         )
 
     signup_email = st.text_input(
@@ -940,41 +1130,136 @@ with signup_page:
         if not signup_email_valid:
             st.caption(":red[That doesn't look like a valid email format.]")
 
+    # Scope is derived, not asked for: states already in the user's tracker
+    # (else the configured default), years are the current lookback default.
+    # It stays visible as text -- the coverage promise is explicit -- without
+    # being a control the user has to operate (SPR-32 §1). The full-indexed-
+    # range year scope described in the SPR-26 plan needs SPR-30's offline
+    # index to know what "full" means; until that lands this keeps today's
+    # SIGNUP_DEFAULT_LOOKBACK_YEARS window rather than overclaiming a range
+    # nothing has actually indexed yet.
     tracker_states = sorted(
         {s for s in st.session_state.source_data.get("state", pd.Series(dtype=str)).tolist() if s}
     )
-    default_states = tracker_states or [PILOT_STATE]
+    resolved_states = tuple(sorted(tracker_states or [PILOT_STATE]))
     current_year = date.today().year
+    resolved_start_year = max(2010, current_year - (SIGNUP_DEFAULT_LOOKBACK_YEARS - 1))
+    resolved_end_year = current_year
+    st.caption(describe_signup_scope(resolved_states, resolved_start_year, resolved_end_year, SIGNUP_DEFAULT_MAX_CALLS))
 
-    with st.expander("Optional search hints", expanded=False):
-        signup_states = st.multiselect(
-            "States",
-            options=[code for code, _ in ALL_STATES],
-            default=default_states,
-            key="signup_states",
+    current_stamp = signup_query_stamp(signup_first_name, signup_last_name, signup_dob)
+    stale_query = (
+        st.session_state.signup_query_stamp is not None
+        and current_stamp != st.session_state.signup_query_stamp
+    )
+
+    # -------------------------------------------------
+    # Connected track (SPR-74): opt-in, collapsed by default. The anonymous
+    # search above works fully without this -- connecting only adds the
+    # runner's own registration list as a second source of candidates, fed
+    # through the same sweep_for_runner + confirm/reject cards below.
+    # -------------------------------------------------
+    with st.expander("🔗 Connect my RunSignUp account", expanded=False):
+        st.caption(
+            "Optional. The search above already works without connecting -- this adds your own "
+            "RunSignUp registration list as a source, instead of only guessing from your name."
         )
-        signup_year_range = st.slider(
-            "Years",
-            min_value=2010,
-            max_value=current_year,
-            value=(max(2010, current_year - (SIGNUP_DEFAULT_LOOKBACK_YEARS - 1)), current_year),
-            key="signup_year_range",
+        st.caption(
+            f"Requests the `{oauth.READ_SCOPE}` scope, which is **read-only**. RunSignUp has no "
+            "results- or profile-specific scope, so this necessarily grants more than this feature "
+            "needs -- there is no narrower permission to ask for. Nothing from your account is "
+            "stored: the access token lives only in this browser session and is gone when it ends."
         )
 
-    resolved_states = tuple(sorted(signup_states or default_states))
-    resolved_start_year, resolved_end_year = signup_year_range
-    st.info(describe_signup_scope(resolved_states, resolved_start_year, resolved_end_year, SIGNUP_DEFAULT_MAX_CALLS))
+        if st.session_state.connected_oauth_error:
+            st.error(st.session_state.connected_oauth_error)
+
+        if not st.session_state.connected_access_token:
+            if not oauth.is_configured():
+                st.info("RunSignUp connection is not configured on this deployment yet.")
+            elif st.session_state.connected_oauth_pending_url:
+                st.link_button(
+                    "Continue to RunSignUp to authorize",
+                    st.session_state.connected_oauth_pending_url,
+                    type="primary",
+                )
+                st.caption("Opens RunSignUp's consent screen in this tab. Come back here afterward.")
+            elif st.button("Connect my RunSignUp account"):
+                try:
+                    pending = oauth.begin_authorization(oauth.oauth_config())
+                except oauth.OAuthConfigError as exc:
+                    st.session_state.connected_oauth_error = str(exc)
+                else:
+                    store = _pending_oauth_store()
+                    _prune_pending_oauth(store)
+                    store[pending.state] = (pending.code_verifier, datetime.now(timezone.utc))
+                    st.session_state.connected_oauth_pending_url = pending.url
+                    st.session_state.connected_oauth_error = ""
+                st.rerun()
+        else:
+            st.success("Connected to RunSignUp.")
+            connected_ready = bool(
+                signup_first_name.strip() and signup_last_name.strip() and signup_dob is not None
+            )
+            if not connected_ready:
+                st.caption("Enter your first name, last name, and date of birth above, then search.")
+            if st.button("Find my races from RunSignUp", disabled=not connected_ready):
+                try:
+                    with st.spinner("Checking your RunSignUp registrations..."):
+                        connected_matches, connected_coverage = run_connected_sweep(
+                            signup_first_name.strip(),
+                            signup_last_name.strip(),
+                            st.session_state.connected_access_token,
+                            resolved_states,
+                            resolved_start_year,
+                            resolved_end_year,
+                        )
+                    st.session_state.signup_matches = st.session_state.signup_matches + connected_matches
+                    st.session_state.signup_outcome = "done"
+                    st.session_state.signup_query_stamp = current_stamp
+                    stale_query = False
+                    st.session_state.connected_coverage_text = connected_coverage.describe()
+                    st.session_state.connected_search_error = ""
+                except Exception as exc:
+                    st.session_state.connected_search_error = str(exc)
+                st.rerun()
+
+            if st.session_state.connected_search_error:
+                st.error("The RunSignUp lookup did not finish.")
+                st.code(st.session_state.connected_search_error)
+            if st.session_state.connected_coverage_text:
+                st.caption(st.session_state.connected_coverage_text)
+
+            if st.button("Disconnect RunSignUp"):
+                st.session_state.connected_access_token = None
+                st.session_state.connected_oauth_pending_url = ""
+                st.session_state.connected_coverage_text = ""
+                st.rerun()
 
     find_clicked = st.button("Find My Races", type="primary")
 
     run_token = None
     if find_clicked:
-        if not signup_first_name.strip() or not signup_last_name.strip() or signup_dob is None:
-            st.session_state.signup_error = "First name, last name, and date of birth are all required."
+        # Pre-flight length check (SPR-42): max_chars=80 on the widgets above
+        # stops most of this at the keyboard, but a plain-language rejection
+        # here stops the request itself for anything that still arrives too
+        # long -- QA sent a 10,000-character first name straight into an
+        # HTTP 414 and got raw nginx HTML back.
+        if len(signup_first_name) > 80 or len(signup_last_name) > 80:
+            validation_error = "First and last name must be 80 characters or fewer."
+        elif not signup_first_name.strip() or not signup_last_name.strip() or signup_dob is None:
+            validation_error = "First name, last name, and date of birth are all required."
         elif signup_email.strip() and not signup_email_valid:
-            st.session_state.signup_error = "Fix the email format (or clear it) before searching."
+            validation_error = "Fix the email format (or clear it) before searching."
+        else:
+            validation_error = ""
+
+        if validation_error:
+            st.session_state.signup_error = validation_error
         else:
             st.session_state.signup_error = ""
+            st.session_state.signup_outcome = ""
+            st.session_state.signup_search_error_detail = ""
             st.session_state.signup_matches = []
             st.session_state.signup_resume_cursor = ""
             st.session_state.signup_capped = False
@@ -988,18 +1273,15 @@ with signup_page:
                 "end_year": resolved_end_year,
                 "max_calls": SIGNUP_DEFAULT_MAX_CALLS,
             }
+            st.session_state.signup_query_stamp = current_stamp
+            stale_query = False
             run_token = "search"
 
     if st.session_state.signup_error:
         st.error(st.session_state.signup_error)
 
-    if st.session_state.signup_capped and st.session_state.signup_scope:
-        st.warning(
-            f"Stopped at the {st.session_state.signup_scope['max_calls']}-call cap; "
-            f"{st.session_state.signup_candidates_checked} of {st.session_state.signup_candidates_total} "
-            "candidates checked."
-        )
-        if st.button("Continue searching"):
+    if run_token is None and st.session_state.pop("signup_continue_requested", False):
+        if not stale_query and st.session_state.signup_scope:
             run_token = "continue"
 
     if run_token and st.session_state.signup_scope:
@@ -1009,10 +1291,16 @@ with signup_page:
 
         def _on_progress(progress, _bar=progress_bar, _caption=progress_caption):
             render_signup_progress(progress, _bar, _caption)
+            # Persisted as each batch completes, not just on a clean return,
+            # so a mid-sweep failure's error message (below) reports how far
+            # *this* attempt actually got instead of a stale count left over
+            # from a previous successful search.
+            st.session_state.signup_candidates_checked = progress.candidates_checked
+            st.session_state.signup_candidates_total = progress.candidates_total
 
         try:
             with st.spinner("Searching RunSignUp..."):
-                new_matches, sweep_progress = cached_sweep_for_runner(
+                new_matches, sweep_progress = run_signup_sweep(
                     signup_first_name.strip(),
                     signup_last_name.strip(),
                     scope["states"],
@@ -1027,15 +1315,40 @@ with signup_page:
             st.session_state.signup_capped = sweep_progress.capped
             st.session_state.signup_candidates_checked = sweep_progress.candidates_checked
             st.session_state.signup_candidates_total = sweep_progress.candidates_total
+            st.session_state.signup_index_built_at = sweep_progress.index_built_at
+            st.session_state.signup_outcome = "done"
         except Exception as exc:
-            st.session_state.signup_error = f"Search failed: {exc}"
-            st.error(st.session_state.signup_error)
+            st.session_state.signup_outcome = "error"
+            st.session_state.signup_search_error_detail = str(exc)
 
-    if st.session_state.signup_matches:
-        classified = classify_signup_matches(st.session_state.signup_matches, signup_dob)
-        high = [r for r in classified if r["_confidence"] == runner_matching.HIGH]
-        possible = [r for r in classified if r["_confidence"] == runner_matching.POSSIBLE]
-        rejected = [r for r in classified if r["_confidence"] == runner_matching.REJECTED]
+    # Four terminal states, structurally distinct (SPR-40/43/49): a stale
+    # query (SPR-37) always wins since nothing below it is trustworthy once
+    # the form has moved on; then a failed search, which must never say "no
+    # results"; then found-something vs. searched-and-found-nothing (which
+    # share a coverage line but are otherwise separate branches, not a
+    # fall-through); and within "found nothing", an empty index (known == 0,
+    # SPR-49) is its own state, chosen before complete/capped ever get a say
+    # -- see signup_done_state.
+    if stale_query:
+        st.info("You changed the search — run it again.")
+    elif st.session_state.signup_outcome == "error":
+        checked = st.session_state.signup_candidates_checked
+        total = max(st.session_state.signup_candidates_total, checked)
+        st.error(
+            f"The search did not finish: RunSignUp returned an error after {checked} of {total} lookups. "
+            "We have not searched everything, so we cannot tell you whether you have results."
+        )
+        if st.session_state.signup_search_error_detail:
+            with st.expander("Technical details"):
+                st.code(st.session_state.signup_search_error_detail)
+    elif st.session_state.signup_matches:
+        classified = classify_signup_matches(
+            st.session_state.signup_matches, signup_first_name, signup_last_name, signup_dob
+        )
+        certain = [r for r in classified if r["_verdict"].bucket == runner_matching.CERTAIN]
+        maybe = [r for r in classified if r["_verdict"].bucket == runner_matching.MAYBE]
+        ruled_out = [r for r in classified if r["_verdict"].bucket == runner_matching.RULED_OUT]
+        impossible_count = sum(1 for r in classified if r["_verdict"].bucket == runner_matching.IMPOSSIBLE)
 
         # RunSignUp publishes many events as several result sets (Overall, Age
         # Group, gender splits) containing the same finishers, so the same race
@@ -1070,7 +1383,8 @@ with signup_page:
             c2.write(row.get("race_date", ""))
             c3.write(row.get("race_type", "") or "Unknown type")
             c4.write(row.get("finish_time", "") or "—")
-            age_display = row["_result_age"] if row["_result_age"] is not None else "—"
+            result_age = row["_verdict"].result_age
+            age_display = result_age if result_age is not None else "—"
             c5.write(f"Age: {age_display}")
 
             # Who this result actually belongs to. Name matching is exact on
@@ -1091,8 +1405,16 @@ with signup_page:
                 identity_bits.append(f"bib {raw['bib']}")
             st.caption(" · ".join(identity_bits))
 
+            # Provenance (SPR-74): a candidate found via the runner's own
+            # RunSignUp registrations deserves more trust than a name guess,
+            # and this is the only place that still carries the distinction --
+            # it is not a parallel scoring path, classify_match ran the same
+            # way either way.
+            if context.get("from_registration"):
+                st.caption("✅ From your registrations — not just someone with your name.")
+
             if show_reason:
-                st.caption(row["_reason"])
+                st.caption(row["_verdict"].reason)
 
             if already_confirmed:
                 st.caption("Added to your race list.")
@@ -1115,28 +1437,123 @@ with signup_page:
                         st.rerun()
             st.divider()
 
-        st.markdown(f"#### High confidence ({len(high)})")
-        if not high:
-            st.caption("No high-confidence matches yet.")
-        for idx, row in enumerate(high):
-            _render_match_row("high", idx, row, show_reason=False)
+        st.markdown(f"#### Your races ({len(certain)})")
+        if not certain:
+            st.caption("No confirmed races yet.")
+        for idx, row in enumerate(certain):
+            _render_match_row("certain", idx, row, show_reason=False)
 
-        # Collapsed by default, like Rejected. Most "Possible" rows are results
-        # RunSignUp published without an age, which means a same-name stranger
-        # cannot be told apart from you by the only signal we have. Showing
-        # those expanded buries your real races under other people's.
-        with st.expander(f"Possible ({len(possible)}) — same name, age unconfirmed", expanded=False):
-            if not possible:
-                st.caption("No possible matches yet.")
-            for idx, row in enumerate(possible):
-                _render_match_row("possible", idx, row, show_reason=True)
+        # Expanded when "Your races" is empty, collapsed once it has
+        # something, so a real match is never buried under weaker ones.
+        with st.expander(
+            f"Could be you ({len(maybe)}) — same name, age unconfirmed",
+            expanded=(len(certain) == 0),
+        ):
+            if not maybe:
+                st.caption("Nothing here yet.")
+            for idx, row in enumerate(maybe):
+                _render_match_row("maybe", idx, row, show_reason=True)
 
-        with st.expander(f"Rejected ({len(rejected)})", expanded=False):
-            for idx, row in enumerate(rejected):
-                _render_match_row("rejected", idx, row, show_reason=True)
-    elif run_token:
-        st.info("No matching results found in this scope yet.")
+        with st.expander(f"Ruled out ({len(ruled_out)})", expanded=False):
+            for idx, row in enumerate(ruled_out):
+                _render_match_row("ruled_out", idx, row, show_reason=True)
 
+        # Impossible rows are a count, never a list (SPR-26 §2/§3): a race
+        # held before the entered date of birth is dropped, not demoted,
+        # and there is no confirm button for the user to click on it.
+        if impossible_count:
+            st.caption(
+                f"We ignored {impossible_count} result{'s' if impossible_count != 1 else ''} for "
+                "races held before your date of birth."
+            )
+    elif st.session_state.signup_outcome == "done":
+        scope = st.session_state.signup_scope or {}
+        state_text = ", ".join(scope.get("states", ())) or "no states"
+        known = st.session_state.signup_candidates_total
+        start_year, end_year = scope.get("start_year", ""), scope.get("end_year", "")
+        if signup_done_state(known) == SIGNUP_STATE_UNBUILT_INDEX:
+            st.info(describe_signup_unbuilt_index_state(state_text, start_year, end_year))
+        else:
+            st.info(
+                describe_signup_no_match_state(known, st.session_state.signup_capped, state_text, start_year, end_year)
+            )
+
+    # Coverage line, present under every completed outcome except a failed
+    # search (SPR-43) or an unbuilt index (SPR-49) -- those branches above
+    # already state their own coverage (or lack of it) inline, and "Searched
+    # all 0 known results" is exactly the contradiction SPR-49 exists to
+    # stop. "Keep looking" only exists while the search has not covered
+    # everything it could; the cap is read straight off the same numbers the
+    # sentence is built from, never a separate flag that could drift from it.
+    if (
+        not stale_query
+        and st.session_state.signup_outcome == "done"
+        and signup_done_state(st.session_state.signup_candidates_total) != SIGNUP_STATE_UNBUILT_INDEX
+    ):
+        known = st.session_state.signup_candidates_total
+        checked = st.session_state.signup_candidates_checked
+        built_at = st.session_state.signup_index_built_at
+        refreshed_text = f" Index last refreshed {built_at}." if built_at else " Index has not been built for this scope yet."
+        if st.session_state.signup_capped:
+            st.caption(f"Searched {checked} of {known} known results.{refreshed_text}")
+            if st.button("Keep looking"):
+                st.session_state.signup_continue_requested = True
+                st.rerun()
+        else:
+            st.caption(f"Searched all {known} known results.{refreshed_text}")
+
+
+# -------------------------------------------------
+# Page 4: Bounded discovery experiment review
+# -------------------------------------------------
+with discovery_page:
+    summary = discovery.EXPERIMENT_SUMMARY
+    st.subheader("Bounded RunSignUp Discovery Review")
+    st.caption(
+        "An anonymized, read-only view of the two-runner experiment. These candidates are not "
+        "imported into the tracker and names are intentionally omitted."
+    )
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Eligible source rows", f"{summary['eligible_rows']:,}")
+    d2.metric("Sampled runners", len(discovery.RUNNERS))
+    d3.metric("High-confidence candidates", sum(row["High confidence"] for row in discovery.RUNNERS))
+    d4.metric("External requests", summary["external_requests"])
+
+    st.markdown("#### Sample and bounds")
+    st.write(
+        f"Source: **{summary['source_race']}** on {summary['source_date']}. "
+        f"Five-year lookback from {summary['lookback_floor']}; at most "
+        f"{summary['candidate_cap_per_runner']} candidate races per runner and "
+        f"{summary['race_day_cap']} race days per result-set discovery."
+    )
+    st.caption("Reproducible sampling seed")
+    st.code(summary["sample_seed"], language=None)
+    st.dataframe(pd.DataFrame(discovery.RUNNERS), width="stretch", hide_index=True)
+
+    st.markdown("#### Candidate evidence")
+    st.dataframe(
+        pd.DataFrame(discovery.CANDIDATE_RESULTS), width="stretch", hide_index=True,
+        column_config={"Public URL": st.column_config.LinkColumn("RunSignUp evidence", display_text="Open public result")},
+    )
+    st.info(
+        "An exact name is discovery evidence, not identity proof. High confidence requires the exact "
+        "case-insensitive full name plus at least two corroborators. Conflicting/name-only rows are rejected."
+    )
+
+    with st.expander("Request accounting and experiment limitations"):
+        st.dataframe(pd.DataFrame(discovery.REQUEST_COUNTS), width="stretch", hide_index=True)
+        st.markdown(
+            "- Public RunSignUp pages only; no credentials, contact data, or social enrichment.\n"
+            "- Search indexing and the five-race-day cap can miss valid history.\n"
+            "- Zero confident matches are a valid outcome.\n"
+            "- Candidate history should require user review and must never auto-import."
+        )
+
+    st.divider()
+    # Moved out of the Sign Up tab (SPR-32 §1/§7) so that tab is unambiguously
+    # four fields. Not required to get a result from Sign Up today -- this is
+    # a manual, race-ID-driven lookup for when you already know the race.
     with st.expander("Advanced: search one specific race", expanded=False):
         st.caption(
             "Pulls real finisher results straight from RunSignUp for a single race you already know, "
@@ -1372,54 +1789,6 @@ with signup_page:
                     width='stretch',
                     hide_index=True,
                 )
-
-
-# -------------------------------------------------
-# Page 4: Bounded discovery experiment review
-# -------------------------------------------------
-with discovery_page:
-    summary = discovery.EXPERIMENT_SUMMARY
-    st.subheader("Bounded RunSignUp Discovery Review")
-    st.caption(
-        "An anonymized, read-only view of the two-runner experiment. These candidates are not "
-        "imported into the tracker and names are intentionally omitted."
-    )
-
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("Eligible source rows", f"{summary['eligible_rows']:,}")
-    d2.metric("Sampled runners", len(discovery.RUNNERS))
-    d3.metric("High-confidence candidates", sum(row["High confidence"] for row in discovery.RUNNERS))
-    d4.metric("External requests", summary["external_requests"])
-
-    st.markdown("#### Sample and bounds")
-    st.write(
-        f"Source: **{summary['source_race']}** on {summary['source_date']}. "
-        f"Five-year lookback from {summary['lookback_floor']}; at most "
-        f"{summary['candidate_cap_per_runner']} candidate races per runner and "
-        f"{summary['race_day_cap']} race days per result-set discovery."
-    )
-    st.caption("Reproducible sampling seed")
-    st.code(summary["sample_seed"], language=None)
-    st.dataframe(pd.DataFrame(discovery.RUNNERS), width="stretch", hide_index=True)
-
-    st.markdown("#### Candidate evidence")
-    st.dataframe(
-        pd.DataFrame(discovery.CANDIDATE_RESULTS), width="stretch", hide_index=True,
-        column_config={"Public URL": st.column_config.LinkColumn("RunSignUp evidence", display_text="Open public result")},
-    )
-    st.info(
-        "An exact name is discovery evidence, not identity proof. High confidence requires the exact "
-        "case-insensitive full name plus at least two corroborators. Conflicting/name-only rows are rejected."
-    )
-
-    with st.expander("Request accounting and experiment limitations"):
-        st.dataframe(pd.DataFrame(discovery.REQUEST_COUNTS), width="stretch", hide_index=True)
-        st.markdown(
-            "- Public RunSignUp pages only; no credentials, contact data, or social enrichment.\n"
-            "- Search indexing and the five-race-day cap can miss valid history.\n"
-            "- Zero confident matches are a valid outcome.\n"
-            "- Candidate history should require user review and must never auto-import."
-        )
 
 
 # -------------------------------------------------
