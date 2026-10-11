@@ -295,6 +295,30 @@ def test_parses_a_bare_top_level_list():
     assert reg.race_id == 7
 
 
+def test_parses_the_key_the_live_endpoint_actually_uses():
+    # Confirmed 2026-10-11 against a real consented account, which returned
+    # {"user_registered_races": [...]}. Until that run the response schema was
+    # published as bare {"type": "object"} and this key was not among the
+    # guesses -- the list was only found by the longest-list fallback below.
+    # Pinned here so a future tidy-up of _LIST_KEYS cannot drop the one key we
+    # have actually observed.
+    payload = {"user_registered_races": [{"race_id": 11, "name": "Observed"}]}
+    assert oauth.registration_list_key(payload) == "user_registered_races"
+    (reg,) = oauth.parse_registrations(payload)
+    assert reg.race_id == 11
+
+
+def test_the_observed_key_wins_over_a_longer_unrelated_list():
+    # The fallback picks the *longest* list of objects, so without
+    # user_registered_races being an explicit key, a bigger sibling list would
+    # beat the real one.
+    payload = {
+        "user_registered_races": [{"race_id": 1}],
+        "promotions": [{"race_id": 90}, {"race_id": 91}, {"race_id": 92}],
+    }
+    assert [r.race_id for r in oauth.parse_registrations(payload)] == [1]
+
+
 def test_falls_back_to_the_longest_list_under_an_unexpected_key():
     # If RunSignUp names the key something we did not predict, degrade to
     # "parsed something" rather than silently reporting zero registrations.

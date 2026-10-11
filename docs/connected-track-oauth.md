@@ -214,7 +214,44 @@ while **preserving `user`**. Authorization codes are single-use and expire in 5 
 one in the address bar puts it in browser history and in any screenshot. Clear the two keys
 individually rather than calling `st.query_params.clear()`.
 
-## The load-bearing unknown
+## The load-bearing unknown — ANSWERED 2026-10-11: past races ARE returned
+
+The board user ran `probe.cmd` against their own consented account. Verdict, exit code 0:
+
+> Past races ARE returned (all 7 are in the past). The connected track can deliver race history.
+
+| | |
+|---|---|
+| registrations parsed | 7 |
+| in the past | 7 |
+| today or upcoming | 0 |
+| no usable date | 0 |
+| earliest race date | 2021-07-19 |
+| latest race date | 2026-05-09 |
+| real payload shape | `{user_registered_races: list[7]}` |
+| list key | `user_registered_races` |
+| access token lifetime | 2682000s (31 days, as documented) |
+
+So this ticket is **not** closed — it is built. Three things the probe settled beyond the
+verdict:
+
+1. **A five-year span of history, from one lookup.** 2021 to 2026 against an account with
+   nothing indexed. That is the capability the ticket was for.
+2. **The real list key is `user_registered_races`**, which was not among the guesses in
+   `_LIST_KEYS`. The list was found only by the longest-list fallback — correct by luck. It is
+   now the first key checked, and pinned by a test, because the fallback picks the *longest*
+   list of objects and a bigger sibling list would have beaten the real one.
+3. **`scope` is not reported in the token response** (`(not reported)` in the report). So the
+   granted scope cannot be displayed back to the runner from the grant; the consent screen is
+   the only place it is stated. Do not build UI that claims to show the granted scope.
+
+Two of the original questions remain open and are **not** worth a second probe: whether
+cancelled/DNS registrations appear, and whether SPR-16's one-year data window applies. Neither
+changes the design — a registration with no matching result row simply yields no candidate, and
+the sweep's name+age matching is what decides a row either way. They will answer themselves in
+use.
+
+The original statement of the unknown follows, since it is why the module is shaped as it is.
 
 **`registered-races` takes no date filter and no pagination.** Its documented parameters are
 exactly `rsu_api_reg`, `X-RSU-API-REG-SECRET`, and `format`. Its published 200 response schema
@@ -303,13 +340,87 @@ This is a design consequence worth knowing before writing the expander, which is
 not in this change. It also rules out Streamlit's native `st.login()`: that is OIDC-only and
 needs a discovery document and an `id_token`, and RunSignUp's OAuth 2.0 is neither.
 
-## Design once that is answered
+## Design, now that it is answered
 
 The chain is necessarily:
 
 ```
 registered-races -> race_id list -> existing per-race result-set discovery -> runner_matching
 ```
+
+Built as `connected_track.py`. It takes an access token and returns candidate result sets in
+exactly the shape `results_search.sweep_for_runner` already consumes, then stops. The sweep and
+the matching are the anonymous track's existing code, unchanged.
+
+### What the offline index changed about this track's value
+
+The ticket argued this track on call count: ~20-60 calls instead of the anonymous track's
+~300-500. That framing is out of date, and the real argument is now stronger.
+
+SPR-30 moved discovery offline. The anonymous track reads candidates from a SQLite index that a
+human builds per state/year (`results_search.build_index`, CLI only). If the index does not
+cover a scope, the search **cannot answer at all** — that is SPR-49's `unbuilt_index` terminal
+state.
+
+The connected track needs none of it. Registrations name the race ids outright, so there is no
+index to build, no state list to pick, and no year range to guess. A connected runner gets an
+answer on an account with nothing indexed. That is a capability difference, not a speed one.
+
+### The date is the whole correctness problem
+
+`runsignup_results.discover_result_sets` scans only the **five most recent race days** of a race
+by default (`DEFAULT_DISCOVERY_EVENT_DAYS`). That is right for its original caller, which wanted
+recent results, and wrong here: a `race_id` identifies a recurring race *series*, so for an
+annual race the five most recent days are the last five years. Calling it plainly would silently
+miss a 2021 registration on a race that has run every year since.
+
+The probe's own account spans 2021–2026, so this is measured, not hypothetical — the naive call
+would have lost the oldest races on the very account the feature was built for.
+
+Registrations carry the race date, so `select_event_days` targets it instead, widening only when
+the previous tier finds nothing:
+
+1. events dated exactly the registration date
+2. events within `EVENT_DAY_TOLERANCE_DAYS` (3) — a race weekend, or a registration stamped with
+   the race-level `next_date` rather than the event's own
+3. events in the same calendar year — the coarsest identifier that still picks one running
+4. no match: reported as a race that could not be covered, rather than scanning everything
+
+This fixes the miss *and* costs fewer calls than widening the scan would: 1 `/race/{id}` call
+plus 1 `get-result-sets` per event on the targeted day, so 2-4 calls for a typical race.
+
+### Both date keys, one value
+
+A candidate sets `event_date` **and** `date` from a single value. Both are load-bearing and they
+are read by different code:
+
+- `event_date` is the frozen SPR-30 candidate contract; `app.py` reads it off `_context` to
+  backfill a row's `race_date`.
+- `date` is what `runsignup_results.result_to_tracker_row` actually reads for `race_date`.
+
+Setting one and not the other yields rows with a blank date, which presents as a data problem
+rather than a wiring one. A test builds a real tracker row and asserts the date survives, rather
+than asserting on our own dict shape.
+
+### On unifying the budget
+
+`connected_track.CallBudget` is deliberately the same shape as `results_search.CallBudget` — a
+`limit`, a `used`, and a `spend()` that returns False when exhausted — so the two can be merged
+into one cap when this is wired into the Sign Up tab. It is not imported from there because
+`results_search` does not exist on `main`; it arrives with PR #5.
+
+It is single-threaded by design: this stage issues calls serially, so none of SPR-46's
+compare-and-swap concurrency work applies. If it is ever parallelised, take that version instead
+of making this one thread-safe.
+
+### "No results" must never mean "we stopped looking"
+
+`RaceDiscovery.truncated` separates a race that published nothing from a race the budget cut
+short. Those are opposite messages — "nothing to find" versus "we did not look" — and an empty
+list alone would make the UI claim the first when it means the second. This is the same failure
+SPR-49 fixed for the anonymous track's empty index, so it is not a hypothetical class of bug in
+this codebase. `CoverageReport.describe()` is counts only, with no race names, so it is safe to
+log or paste into a ticket; the candidates are not.
 
 ### No second matching engine
 
@@ -351,23 +462,61 @@ back to the longest list of objects, so an unexpected name degrades to "parsed s
 rather than a silent zero. Records with no usable `race_id` are dropped, since that is the one
 field per-race discovery cannot work without.
 
-`test_runsignup_oauth.py` — 49 tests, no network, no credentials, matching
+`test_runsignup_oauth.py` — 60 tests, no network, no credentials, matching
 `test_runsignup_helpers.py`. The three areas that carry real risk get the most attention: PKCE
 and state (a subtle bug here still *works*, and only matters when attacked), the two error
 conventions (confusing them reads a rejected token as an empty result), and parsing the
 undocumented payload.
 
-### UI
+### `connected_track.py`
 
-Not in this change — see "Why the probe is a CLI rather than the app's own button" for the
-Streamlit session-state constraint that has to be designed around first, and the load-bearing
-unknown that decides whether this UI should exist at all.
+| Function | Purpose |
+|---|---|
+| `discover_connected_candidates(token, ...)` | entry point: access token -> candidate result sets |
+| `candidates_from_registrations(regs, ...)` | the whole pass, within a call budget |
+| `candidates_for_registration(reg, budget)` | one registered race -> its candidates, date-targeted |
+| `select_event_days(events, race_date)` | picks the right *running* of a recurring race |
+| `partition_registrations(regs)` | `(past, upcoming, undated)`; only past ones can have results |
+| `CoverageReport` / `.describe()` | counts only — safe to log; says when the cap was hit |
+| `RaceDiscovery.truncated` | "budget cut this short" vs "this race published nothing" |
 
-When built: a "Connect my RunSignUp account" expander in the Sign Up tab, collapsed by default,
-stating what is requested (`rsu_api_read`, read-only), that nothing is stored, and that the
-anonymous search works without connecting. The Sign Up tab arrives with PR #5 (SPR-15), which
-is not yet merged — `main` still has the old "Find My Results" tab — so there is no place to
-hang it today either.
+Upcoming registrations cost **zero** API calls: results cannot exist for a race that has not
+happened, so confirming that would be waste. Undated registrations are checked *after* dated
+ones — they cost more (a recent-days scan, with no date to target) and are less certain, so they
+are the first thing a tight budget gives up on. The measured account had none, but the schema is
+undocumented, so they are handled rather than assumed away.
+
+`test_connected_track.py` — 40 tests, no network and no credentials, both HTTP entry points
+monkeypatched. The four areas that carry real risk: date targeting (including an explicit
+regression test that an old running of an annual race with 8 runnings is still found), the two
+date keys, budget accounting, and the past/upcoming split.
+
+### UI — still not in this change, and now for one reason rather than two
+
+The load-bearing unknown is answered, so the question of whether this UI should exist at all is
+settled: it should. What remains is a real blocker and a real constraint.
+
+**Blocker: there is nowhere to put it.** The expander belongs in the Sign Up tab, which arrives
+with PR #5 (SPR-15) and is then substantially rebuilt by SPR-24. `main` still has the old "Find
+My Results" tab. Building the expander against a tab that is concurrently being rewritten on two
+branches would conflict for no gain, so it waits for PR #5 to merge.
+
+**Constraint to design around: Streamlit resets `st.session_state` on a full page load, and an
+OAuth redirect is one.** The browser leaves for `runsignup.com` and returns to a *new* session,
+so the PKCE verifier and CSRF `state` stored before the redirect are gone when the callback
+arrives — the flow cannot complete or be CSRF-checked. The remedy is a server-side
+`@st.cache_resource` store keyed by `state`, pruned on the authorization code's 5-minute
+expiry. This also rules out Streamlit's native `st.login()`, which is OIDC-only and wants a
+discovery document and an `id_token`; RunSignUp's OAuth 2.0 is neither.
+
+When built: a "Connect my RunSignUp account" expander, collapsed by default, stating what is
+requested (`rsu_api_read`, read-only — and that it necessarily grants more than this feature
+needs, since there is no narrower scope), that nothing is stored, and that the anonymous search
+works without connecting. Candidates carry `from_registration: True`, so a card sourced from the
+runner's own registration list can say so — that is provenance on the card, not a parallel
+scoring path. The callback handler must clear `code` and `state` individually and **preserve
+`user`**; never `st.query_params.clear()`. A single-use authorization code left in the address
+bar lands in browser history and in any screenshot.
 
 ## Configuration
 

@@ -28,6 +28,12 @@ Four things here were found by probing and contradict the published spec, so do 
    where the list lives, and ``describe_payload_shape`` exists to report what
    actually came back. See "The load-bearing unknown" in the design doc.
 
+   Resolved 2026-10-11: a real consented account returned
+   ``{"user_registered_races": [...]}`` and **included past races** -- 7
+   registrations spanning 2021-07-19 to 2026-05-09, none upcoming. That was the
+   finding the whole ticket waited on, and it is why ``connected_track`` exists.
+   The tolerance stays anyway: one account's payload is not a schema.
+
 Privacy rules this module enforces rather than documents:
 
 * ``redeem_code`` **drops the refresh token on receipt** and has no way to return
@@ -458,10 +464,23 @@ class Registration:
     state: str = ""
 
 
-# Keys the list of registrations might plausibly live under. The published
-# response schema is bare {"type": "object"}, so this is tolerant by necessity;
-# describe_payload_shape() reports the real shape once a token exists.
-_LIST_KEYS = ("races", "registered_races", "registrations", "race_registrations", "results")
+# Keys the list of registrations might plausibly live under.
+#
+# ``user_registered_races`` is FIRST because it is the one the live endpoint
+# actually uses -- confirmed 2026-10-11 against a real consented account, which
+# returned {"user_registered_races": list[7]}. Before that run the published
+# schema was bare {"type": "object"} and this tuple was pure guesswork; the real
+# key was not in it, so the list was only found by the longest-list fallback
+# below. Keep the guesses after it: they cost nothing and the schema is still
+# undocumented, so RunSignUp is free to add shapes we have not seen.
+_LIST_KEYS = (
+    "user_registered_races",
+    "races",
+    "registered_races",
+    "registrations",
+    "race_registrations",
+    "results",
+)
 
 
 TOP_LEVEL_LIST = "(top-level list)"
