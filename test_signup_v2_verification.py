@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import app
 import results_search as search
 import runner_matching as matching
 import runsignup_results as rsu
@@ -257,6 +258,52 @@ def test_raw_upstream_body_never_escapes(monkeypatch, status, payload):
     assert "<html>" not in message
     assert "nginx" not in message
     assert "logged in" not in message
+
+
+# ---------------------------------------------------------------------------
+# SPR-49 -- an unbuilt index (known == 0) is its own terminal UI state, not
+# a degenerate "searched everything, found nothing" (which reads as
+# "we checked all 0 known results" -- a search that never happened).
+# ---------------------------------------------------------------------------
+FORBIDDEN_PHRASES = ("no results", "none match", "all 0")
+
+
+def _contains_forbidden_phrase(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in FORBIDDEN_PHRASES)
+
+
+def test_unbuilt_index_message_names_the_way_out_without_forbidden_wording():
+    message = app.describe_signup_unbuilt_index_state("MO", 2014, 2026)
+
+    assert not _contains_forbidden_phrase(message)
+    assert "results_search.build_index" in message
+
+
+@pytest.mark.parametrize("complete,capped", [(True, False), (True, True), (False, True), (False, False)])
+def test_unbuilt_index_state_is_chosen_on_known_zero_regardless_of_complete_or_capped(complete, capped):
+    """signup_done_state only ever looks at known -- complete/capped are not
+    even parameters -- so the empty-index branch is structurally unreachable
+    to anything but known == 0, matching the SPR-48 Coverage.complete ruling
+    that known == 0 is always `complete` on its own.
+    """
+    del complete, capped  # not inputs to signup_done_state; that's the point
+    assert app.signup_done_state(known=0) == app.SIGNUP_STATE_UNBUILT_INDEX
+
+
+@pytest.mark.parametrize("known", [1, 2, 400])
+def test_no_match_state_is_chosen_whenever_known_is_nonzero(known):
+    assert app.signup_done_state(known=known) == app.SIGNUP_STATE_NO_MATCH
+
+
+def test_no_match_message_unaffected_by_spr_49_and_never_says_all_0():
+    # A real no-match result legitimately says "none match" (that's the
+    # accurate outcome of a completed search) -- SPR-49 only forbids "all 0"
+    # and the unbuilt-index wording, not the §4 no-match state's own text.
+    message = app.describe_signup_no_match_state(known=3, capped=False, state_text="MO", start_year=2014, end_year=2026)
+
+    assert "all 0" not in message.lower()
+    assert "3 known result" in message
 
 
 def test_no_streamlit_cache_data_function_accepts_dob_or_email():

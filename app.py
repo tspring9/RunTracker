@@ -530,6 +530,46 @@ def describe_signup_scope(states, start_year: int, end_year: int, max_calls: int
     return f"Will search {state_text} for {start_year}–{end_year}, up to {max_calls} API calls."
 
 
+SIGNUP_STATE_UNBUILT_INDEX = "unbuilt_index"
+SIGNUP_STATE_NO_MATCH = "no_match"
+
+
+def signup_done_state(known: int) -> str:
+    """Which terminal message a "done" outcome with no matches renders.
+
+    Branches on ``known == 0`` alone -- before anything about complete or
+    capped even enters the picture (SPR-49). An empty index is its own
+    terminal state, not a degenerate case of "searched everything and found
+    nothing": with zero candidates, ``complete`` is trivially ``True``
+    (``checked == known == 0``), and rendering that as "we checked all 0
+    known results" claims a search that never happened.
+    """
+    return SIGNUP_STATE_UNBUILT_INDEX if known == 0 else SIGNUP_STATE_NO_MATCH
+
+
+def describe_signup_unbuilt_index_state(state_text: str, start_year, end_year) -> str:
+    """known == 0: nothing is indexed for this scope. Must never read as
+    "searched and found nothing" -- it must not contain "no results",
+    "none match", or "all 0" (SPR-49 acceptance #1), name the way out
+    (the offline index builder), and offer no "Keep looking" button since
+    there is nothing indexed to keep looking through.
+    """
+    return (
+        f"Nothing is indexed yet for {state_text} races, {start_year}–{end_year}, so we cannot "
+        "tell you whether you have results there. Run the offline index builder "
+        "(`results_search.build_index`, CLI) for this scope, then search again."
+    )
+
+
+def describe_signup_no_match_state(known: int, capped: bool, state_text: str, start_year, end_year) -> str:
+    return (
+        f"We checked {'all ' if not capped else ''}{known} known result"
+        f"{'s' if known != 1 else ''} for {state_text} races, {start_year}–{end_year}, and none "
+        "match that name and date of birth. That does not mean you did not run — it means not "
+        "in what we checked."
+    )
+
+
 def signup_query_stamp(first_name: str, last_name: str, dob) -> str:
     """Identity of the query that produced a set of Sign Up results (SPR-37).
 
@@ -1082,12 +1122,14 @@ with signup_page:
             st.session_state.signup_outcome = "error"
             st.session_state.signup_search_error_detail = str(exc)
 
-    # Three terminal states, structurally distinct (SPR-40/43): a stale query
-    # (SPR-37) always wins since nothing below it is trustworthy once the
-    # form has moved on; then a failed search, which must never say "no
-    # results"; then found-something vs. searched-and-found-nothing, which
+    # Four terminal states, structurally distinct (SPR-40/43/49): a stale
+    # query (SPR-37) always wins since nothing below it is trustworthy once
+    # the form has moved on; then a failed search, which must never say "no
+    # results"; then found-something vs. searched-and-found-nothing (which
     # share a coverage line but are otherwise separate branches, not a
-    # fall-through.
+    # fall-through); and within "found nothing", an empty index (known == 0,
+    # SPR-49) is its own state, chosen before complete/capped ever get a say
+    # -- see signup_done_state.
     if stale_query:
         st.info("You changed the search — run it again.")
     elif st.session_state.signup_outcome == "error":
@@ -1221,20 +1263,26 @@ with signup_page:
         scope = st.session_state.signup_scope or {}
         state_text = ", ".join(scope.get("states", ())) or "no states"
         known = st.session_state.signup_candidates_total
-        st.info(
-            f"We checked {'all ' if not st.session_state.signup_capped else ''}{known} known result"
-            f"{'s' if known != 1 else ''} for {state_text} races, {scope.get('start_year', '')}–"
-            f"{scope.get('end_year', '')}, and none match that name and date of birth. That does not "
-            "mean you did not run — it means not in what we checked."
-        )
+        start_year, end_year = scope.get("start_year", ""), scope.get("end_year", "")
+        if signup_done_state(known) == SIGNUP_STATE_UNBUILT_INDEX:
+            st.info(describe_signup_unbuilt_index_state(state_text, start_year, end_year))
+        else:
+            st.info(
+                describe_signup_no_match_state(known, st.session_state.signup_capped, state_text, start_year, end_year)
+            )
 
     # Coverage line, present under every completed outcome except a failed
-    # search (SPR-43) -- that branch above already states its own partial
-    # coverage inline. "Keep looking" only exists while the search has not
-    # covered everything it could; the cap is read straight off the same
-    # numbers the sentence is built from, never a separate flag that could
-    # drift from it.
-    if not stale_query and st.session_state.signup_outcome == "done":
+    # search (SPR-43) or an unbuilt index (SPR-49) -- those branches above
+    # already state their own coverage (or lack of it) inline, and "Searched
+    # all 0 known results" is exactly the contradiction SPR-49 exists to
+    # stop. "Keep looking" only exists while the search has not covered
+    # everything it could; the cap is read straight off the same numbers the
+    # sentence is built from, never a separate flag that could drift from it.
+    if (
+        not stale_query
+        and st.session_state.signup_outcome == "done"
+        and signup_done_state(st.session_state.signup_candidates_total) != SIGNUP_STATE_UNBUILT_INDEX
+    ):
         known = st.session_state.signup_candidates_total
         checked = st.session_state.signup_candidates_checked
         built_at = st.session_state.signup_index_built_at
