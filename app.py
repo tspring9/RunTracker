@@ -3,10 +3,12 @@ import requests
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
+import connected_track
 import results_search
 import runner_matching
+import runsignup_oauth as oauth
 import runsignup_results as rsu
 import storage
 import discovery_experiment as discovery
@@ -640,10 +642,124 @@ def classify_signup_matches(matches: list, first_name: str, last_name: str, dob:
 
 
 # -------------------------------------------------
+# Connected track (SPR-20/74): OAuth round trip, then the existing chain
+# -------------------------------------------------
+# PRIVACY: the access token lives in st.session_state only -- never storage,
+# never a log, never a @st.cache_data/@st.cache_resource key. The PKCE verifier
+# and CSRF state are server-side only, in the store below, and are popped
+# (one-time) the moment the callback redeems them.
+CONNECTED_OAUTH_STATE_TTL_SECONDS = 5 * 60  # matches the authorization code's own expiry
+CONNECTED_SWEEP_MAX_CALLS = 200  # sweep-stage cap; discovery has its own cap inside connected_track
+
+
+@st.cache_resource(show_spinner=False)
+def _pending_oauth_store() -> dict:
+    """Server-side ``state -> (code_verifier, created_at)``.
+
+    Streamlit resets st.session_state on the full page load an OAuth redirect
+    causes, so the PKCE verifier and CSRF state started before the redirect
+    have to live somewhere that survives it (docs/connected-track-oauth.md).
+    A cache_resource singleton is that somewhere -- it is process-wide, not
+    per-session, which is the point. Entries are pruned by age on each access
+    rather than by a store-wide TTL, since a store-wide TTL would evict every
+    other visitor's in-flight connection attempt whenever any one of them
+    aged out.
+    """
+    return {}
+
+
+def _prune_pending_oauth(store: dict) -> None:
+    now = datetime.now(timezone.utc)
+    expired = [
+        state
+        for state, (_, created_at) in store.items()
+        if (now - created_at).total_seconds() > CONNECTED_OAUTH_STATE_TTL_SECONDS
+    ]
+    for state in expired:
+        store.pop(state, None)
+
+
+def handle_connected_oauth_callback() -> None:
+    """Redeem an OAuth redirect back from RunSignUp, if this page load is one.
+
+    Must run before anything else on the page depends on st.query_params.
+    Clears ``code`` and ``state`` individually and leaves ``user`` alone --
+    never st.query_params.clear() -- because a single-use authorization code
+    left in the address bar lands in browser history and in any screenshot.
+    """
+    params = st.query_params
+    if "code" not in params and "state" not in params and "error" not in params:
+        return
+
+    returned_state = params.get("state", "") or ""
+    store = _pending_oauth_store()
+    _prune_pending_oauth(store)
+    pending_entry = store.pop(returned_state, None) if returned_state else None
+
+    try:
+        if pending_entry is None:
+            raise oauth.OAuthFlowError(
+                "This RunSignUp connection attempt expired or was already used. Start again."
+            )
+        code_verifier, _created_at = pending_entry
+        code = oauth.authorization_code_from_callback(params, returned_state)
+        grant = oauth.redeem_code(oauth.oauth_config(), code, code_verifier)
+        st.session_state.connected_access_token = grant.access_token
+        st.session_state.connected_oauth_error = ""
+    except Exception as exc:
+        st.session_state.connected_oauth_error = str(exc)
+    finally:
+        # This specific consent link is spent either way -- redeemed on
+        # success, single-use and invalid on failure -- so clear it rather
+        # than leaving a dead "Continue to RunSignUp" link in the expander.
+        st.session_state.connected_oauth_pending_url = ""
+        for key in ("code", "state", "error", "error_description"):
+            if key in st.query_params:
+                del st.query_params[key]
+        st.rerun()
+
+
+def run_connected_sweep(
+    first_name: str,
+    last_name: str,
+    access_token: str,
+    states: tuple,
+    start_year: int,
+    end_year: int,
+) -> tuple[list[dict], connected_track.CoverageReport]:
+    """Access token -> (matches, CoverageReport), through the *existing* chain.
+
+    connected_track turns the runner's own registrations into candidate result
+    sets; results_search.sweep_for_runner does the name filtering -- the same
+    function and the same filtering the anonymous track uses (SPR-15). No
+    second matching engine.
+    """
+    result = connected_track.discover_connected_candidates(access_token)
+    scope = results_search.SearchScope(
+        states=tuple(states), start_year=start_year, end_year=end_year, max_calls=CONNECTED_SWEEP_MAX_CALLS
+    )
+    matches, _sweep_coverage = results_search.sweep_for_runner(first_name, last_name, result.candidates, scope)
+    return matches, result.coverage
+
+
+# -------------------------------------------------
 # Persistent, per-user source data
 # -------------------------------------------------
 # USER_ID is single-tenant for now -- see resolve_user_id() for the auth seam.
 USER_ID = resolve_user_id()
+
+# Must run before anything else reads st.query_params: a RunSignUp OAuth
+# redirect lands here as a fresh session, and this is what completes it.
+handle_connected_oauth_callback()
+
+for _connected_key, _connected_default in (
+    ("connected_access_token", None),
+    ("connected_oauth_pending_url", ""),
+    ("connected_oauth_error", ""),
+    ("connected_coverage_text", ""),
+    ("connected_search_error", ""),
+):
+    st.session_state.setdefault(_connected_key, _connected_default)
 
 if "source_data" not in st.session_state:
     stored_rows = storage.load_races(USER_ID)
@@ -1037,6 +1153,89 @@ with signup_page:
         and current_stamp != st.session_state.signup_query_stamp
     )
 
+    # -------------------------------------------------
+    # Connected track (SPR-74): opt-in, collapsed by default. The anonymous
+    # search above works fully without this -- connecting only adds the
+    # runner's own registration list as a second source of candidates, fed
+    # through the same sweep_for_runner + confirm/reject cards below.
+    # -------------------------------------------------
+    with st.expander("🔗 Connect my RunSignUp account", expanded=False):
+        st.caption(
+            "Optional. The search above already works without connecting -- this adds your own "
+            "RunSignUp registration list as a source, instead of only guessing from your name."
+        )
+        st.caption(
+            f"Requests the `{oauth.READ_SCOPE}` scope, which is **read-only**. RunSignUp has no "
+            "results- or profile-specific scope, so this necessarily grants more than this feature "
+            "needs -- there is no narrower permission to ask for. Nothing from your account is "
+            "stored: the access token lives only in this browser session and is gone when it ends."
+        )
+
+        if st.session_state.connected_oauth_error:
+            st.error(st.session_state.connected_oauth_error)
+
+        if not st.session_state.connected_access_token:
+            if not oauth.is_configured():
+                st.info("RunSignUp connection is not configured on this deployment yet.")
+            elif st.session_state.connected_oauth_pending_url:
+                st.link_button(
+                    "Continue to RunSignUp to authorize",
+                    st.session_state.connected_oauth_pending_url,
+                    type="primary",
+                )
+                st.caption("Opens RunSignUp's consent screen in this tab. Come back here afterward.")
+            elif st.button("Connect my RunSignUp account"):
+                try:
+                    pending = oauth.begin_authorization(oauth.oauth_config())
+                except oauth.OAuthConfigError as exc:
+                    st.session_state.connected_oauth_error = str(exc)
+                else:
+                    store = _pending_oauth_store()
+                    _prune_pending_oauth(store)
+                    store[pending.state] = (pending.code_verifier, datetime.now(timezone.utc))
+                    st.session_state.connected_oauth_pending_url = pending.url
+                    st.session_state.connected_oauth_error = ""
+                st.rerun()
+        else:
+            st.success("Connected to RunSignUp.")
+            connected_ready = bool(
+                signup_first_name.strip() and signup_last_name.strip() and signup_dob is not None
+            )
+            if not connected_ready:
+                st.caption("Enter your first name, last name, and date of birth above, then search.")
+            if st.button("Find my races from RunSignUp", disabled=not connected_ready):
+                try:
+                    with st.spinner("Checking your RunSignUp registrations..."):
+                        connected_matches, connected_coverage = run_connected_sweep(
+                            signup_first_name.strip(),
+                            signup_last_name.strip(),
+                            st.session_state.connected_access_token,
+                            resolved_states,
+                            resolved_start_year,
+                            resolved_end_year,
+                        )
+                    st.session_state.signup_matches = st.session_state.signup_matches + connected_matches
+                    st.session_state.signup_outcome = "done"
+                    st.session_state.signup_query_stamp = current_stamp
+                    stale_query = False
+                    st.session_state.connected_coverage_text = connected_coverage.describe()
+                    st.session_state.connected_search_error = ""
+                except Exception as exc:
+                    st.session_state.connected_search_error = str(exc)
+                st.rerun()
+
+            if st.session_state.connected_search_error:
+                st.error("The RunSignUp lookup did not finish.")
+                st.code(st.session_state.connected_search_error)
+            if st.session_state.connected_coverage_text:
+                st.caption(st.session_state.connected_coverage_text)
+
+            if st.button("Disconnect RunSignUp"):
+                st.session_state.connected_access_token = None
+                st.session_state.connected_oauth_pending_url = ""
+                st.session_state.connected_coverage_text = ""
+                st.rerun()
+
     find_clicked = st.button("Find My Races", type="primary")
 
     run_token = None
@@ -1205,6 +1404,14 @@ with signup_page:
             if raw.get("bib"):
                 identity_bits.append(f"bib {raw['bib']}")
             st.caption(" · ".join(identity_bits))
+
+            # Provenance (SPR-74): a candidate found via the runner's own
+            # RunSignUp registrations deserves more trust than a name guess,
+            # and this is the only place that still carries the distinction --
+            # it is not a parallel scoring path, classify_match ran the same
+            # way either way.
+            if context.get("from_registration"):
+                st.caption("✅ From your registrations — not just someone with your name.")
 
             if show_reason:
                 st.caption(row["_verdict"].reason)
